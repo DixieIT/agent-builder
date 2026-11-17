@@ -1,6 +1,6 @@
 # Ultimate Agent Builder: project laws
 
-These are binding. `bun test` in `web/` enforces the checkable ones (`web/test/architecture.test.ts`).
+These are binding. `bun test` in `web/` enforces the checkable ones (`web/src/architecture.test.ts`).
 
 ## Tooling
 - **Bun only.** `bun install`, `bun add`, `bun run`, `bunx`, `bun test`. Never npm, yarn or pnpm, and no lockfiles other than `bun.lock`.
@@ -17,6 +17,10 @@ These are binding. `bun test` in `web/` enforces the checkable ones (`web/test/a
 - The canonical agent model is the **Pydantic AI AgentSpec** (`src/core/agents/agent-spec.ts`). Builder-only additions are namespaced: `MCPStdio`, `GooseExtension` capabilities and the `x-goose` block.
 - **Goose** is the runtime: specs export to Goose recipes (`adapters/goose`), run with the Goose CLI and package into a Docker image.
 - No mocks or fake data in the product: tool lists come from real MCP servers; if something can't be inspected, say so in the UI.
+
+## Tests
+- Tests live **next to the code they test**: `src/adapters/sqlite/sqlite.test.ts`, `src/core/agents/agent-spec.test.ts`. No top-level `test/` folder. Project-wide rules live in `src/architecture.test.ts`.
+- Every adapter ships with its test. Run everything with `bun test`, one feature with `bun test src/adapters/<name>`.
 
 ## API
 - Every endpoint is declared with `defineRoute` (`src/server/http/route.ts`) under `/api/v1`. Zod schemas validate requests **and** generate the OpenAPI doc (`/api/v1/openapi.json`, Swagger UI at `/api/docs`). Never hand-write OpenAPI.

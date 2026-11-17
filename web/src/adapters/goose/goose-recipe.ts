@@ -1,5 +1,5 @@
 import { parse, stringify } from "yaml";
-import { instructionsText, toCapability, type AgentSpec, type CapabilityEntry, type DepsSchema } from "@/core/agents/agent-spec";
+import { instructionsText, toCapability, type CapabilityEntry, type DepsSchema, type GooseAgentSpec } from "@/core/agents/agent-spec";
 
 /*
  * 1:1 mapping between the canonical AgentSpec and a Goose recipe.
@@ -32,12 +32,12 @@ export interface GooseRecipe {
   extensions?: GooseExtension[];
   settings?: { goose_provider?: string; goose_model?: string; temperature?: number; max_turns?: number };
   response?: { json_schema: Record<string, unknown> };
-  sub_recipes?: AgentSpec["sub_recipes"];
-  retry?: AgentSpec["retry"];
+  sub_recipes?: GooseAgentSpec["sub_recipes"];
+  retry?: GooseAgentSpec["retry"];
   activities?: string[];
 }
 
-export function toGooseRecipe(spec: AgentSpec): { recipe: GooseRecipe; yaml: string; warnings: string[] } {
+export function toGooseRecipe(spec: GooseAgentSpec): { recipe: GooseRecipe; yaml: string; warnings: string[] } {
   const [provider, ...modelParts] = spec.model?.split(":") ?? [];
   const recipe: GooseRecipe = {
     version: "1.0.0",
@@ -137,6 +137,7 @@ export function fromGooseRecipe(input: unknown): { spec: unknown; warnings: stri
 
   const s = r.settings ?? {};
   const spec = prune({
+    runtime: "goose",
     name: String(r.title ?? "agent").replace(/[^A-Za-z0-9_-]+/g, "_").replace(/^[^A-Za-z_]+/, "") || "agent",
     description: r.description ?? "",
     model: s.goose_provider && s.goose_model ? `${s.goose_provider}:${s.goose_model}` : undefined,

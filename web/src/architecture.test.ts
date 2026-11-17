@@ -84,7 +84,10 @@ describe("ports and adapters", () => {
     const ports = files(path.join(SRC, "core")).filter((f) => f.endsWith(".port.ts"));
     const adapterSource = files(path.join(SRC, "adapters")).map((f) => readFileSync(f, "utf8")).join("\n");
     const missing = ports.flatMap((file) => {
-      const interfaces = [...readFileSync(file, "utf8").matchAll(/export interface (\w+)\s*\{[^}]*\(/g)].map((m) => m[1]);
+      // A port is an interface with at least one method (`name(...)`); plain data interfaces are skipped.
+      const interfaces = [...readFileSync(file, "utf8").matchAll(/export interface (\w+)[^{]*\{([^}]*)\}/g)]
+        .filter((m) => /^\s+(readonly\s+)?\w+\??\(/m.test(m[2].replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "")))
+        .map((m) => m[1]);
       return interfaces.filter((name) => !new RegExp(`implements[^{]*\\b${name}\\b`).test(adapterSource)).map((name) => `${rel(file)}: ${name}`);
     });
     expect(missing).toEqual([]);
@@ -99,6 +102,14 @@ describe("api", () => {
       .filter((file) => !readFileSync(file, "utf8").includes("toHandler("))
       .map(rel);
     expect(violations).toEqual([]);
+  });
+});
+
+describe("tests", () => {
+  test("tests are colocated with the feature they test (no top-level test folders)", () => {
+    for (const dir of ["test", "tests", "__tests__"]) expect(existsSync(path.join(WEB, dir))).toBe(false);
+    const nested = files(SRC).filter((f) => /[\/]__tests__[\/]/.test(f)).map(rel);
+    expect(nested).toEqual([]);
   });
 });
 

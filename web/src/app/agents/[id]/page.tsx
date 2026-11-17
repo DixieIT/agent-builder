@@ -1,10 +1,10 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { connection } from "next/server";
-import { AgentEditor } from "@/components/agents/editor/agent-editor";
+import { AgentEditor, type LeleContext } from "@/components/agents/editor";
 import { RepairAgent } from "@/components/agents/repair-agent";
 import { AgentNotFoundError, InvalidAgentDocumentError, InvalidAgentIdError } from "@/core/shared/errors";
-import { agentService } from "@/server/container";
+import { agentService, runService, runtimeCatalog } from "@/server/container";
 
 
 type Props = { params: Promise<{ id: string }> };
@@ -29,5 +29,11 @@ export default async function AgentPage({ params }: Props) {
     return <RepairAgent id={id} issues={loaded.broken.issues} raw={loaded.broken.raw ?? ""} />;
   }
   const { record } = loaded;
-  return <AgentEditor id={record.id} initialSpec={record.spec} updatedAt={record.updatedAt.toISOString()} />;
+  let lele: LeleContext | undefined;
+  if (record.spec.runtime === "lele") {
+    const [catalog, exported] = await Promise.all([runtimeCatalog(), runService().then((runs) => runs.export(record.id))]);
+    const [toolGroups, skills] = await Promise.all([catalog.toolGroups(), catalog.skills()]);
+    lele = { toolGroups, skills, limitations: catalog.limitations(), definition: exported.definition };
+  }
+  return <AgentEditor id={record.id} spec={record.spec} updatedAt={record.updatedAt.toISOString()} lele={lele} />;
 }

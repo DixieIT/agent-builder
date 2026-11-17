@@ -58,7 +58,7 @@ import {
   templateVariables,
   toCapability,
   validateAgentSpec,
-  type AgentSpec,
+  type GooseAgentSpec,
   type SpecIssue,
 } from "@/core/agents/agent-spec";
 import { CapabilityCard } from "./capability-card";
@@ -82,10 +82,10 @@ const MODELS = [
   "google-gla:gemini-2.5-pro",
 ];
 
-type Props = { id: string; initialSpec: AgentSpec; updatedAt: string };
+type Props = { id: string; initialSpec: GooseAgentSpec; updatedAt: string };
 
-export function AgentEditor({ id, initialSpec, updatedAt }: Props) {
-  const [spec, update] = useImmer<AgentSpec>(initialSpec);
+export function GooseAgentEditor({ id, initialSpec, updatedAt }: Props) {
+  const [spec, update] = useImmer<GooseAgentSpec>(initialSpec);
   const [saved, setSaved] = useState(() => JSON.stringify(initialSpec));
   const [savedAt, setSavedAt] = useState(updatedAt);
   const [serverIssues, setServerIssues] = useState<SpecIssue[]>([]);
@@ -586,7 +586,7 @@ export function AgentEditor({ id, initialSpec, updatedAt }: Props) {
             </TabsContent>
 
             <TabsContent value="yaml">
-              <YamlTab spec={spec} onChange={(next) => update(() => next)} />
+              <YamlTab spec={spec} onChange={(next) => (next.runtime === "goose" ? update(() => next) : toast.error("Switching runtime isn't supported here; create a new agent instead."))} />
             </TabsContent>
           </div>
           {allIssues.length ? (

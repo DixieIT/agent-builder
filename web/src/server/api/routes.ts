@@ -5,16 +5,22 @@ import { z } from "zod";
 import { parse as parseYaml } from "yaml";
 import type { AgentEvent } from "@/core/agents/agent-events.port";
 import type { AgentRepository, ProvisionableStore } from "@/core/agents/agent-repository.port";
-import { validateAgentSpec } from "@/core/agents/agent-spec";
-import { toGooseRecipe, fromGooseRecipe } from "@/adapters/goose/goose-recipe";
+import { RUNTIMES, validateAgentSpec } from "@/core/agents/agent-spec";
+import { envKeySchema } from "@/core/environment/environment";
+import { librarySchemas, type LibraryCapability, type LibraryKind, type Skill, type Tool } from "@/core/library/library";
+import type { LibraryCollection, LibraryRepository } from "@/core/library/library-repository.port";
 import { defineRoute, json } from "@/server/http/route";
 import { sseResponse, fromSubscription } from "@/server/sse";
 import {
   agentEvents,
-  agentPackager,
   agentRepository,
+  agentExporter,
   agentRunner,
+  runService,
   agentService,
+  environmentStore,
+  libraryRepository,
+  runtimeCatalog,
   storeKind,
   toolInspector,
 } from "@/server/container";
@@ -25,13 +31,22 @@ import {
   agentSummaryDto,
   buildContextDto,
   buildRequestDto,
+  environmentListingDto,
+  envVarDto,
+  envVarInputDto,
   gooseImportResultDto,
   inspectionResultDto,
+  libraryRecordDto,
   mcpServerRefDto,
+  resolveEnvironmentRequestDto,
+  resolveEnvironmentResultDto,
   runRequestDto,
+  runtimeCatalogDto,
   runtimeStatusDto,
   saveResultDto,
   storeStatusDto,
+  toEnvVarDto,
+  toLibraryRecordDto,
   toRecordDto,
   toSummaryDto,
   validationReportDto,
@@ -187,14 +202,13 @@ export const exportGooseRecipe = defineRoute({
     404: { description: "No agent with this id." },
   },
   handler: async ({ params, query }) => {
-    const service = await agentService();
-    const record = await service.get(params.id);
-    const { yaml, warnings } = toGooseRecipe(record.spec);
-    if (query.format === "json") return json({ yaml, warnings });
-    return new Response(yaml, {
+    const exported = await (await runService()).export(params.id);
+    if (query.format === "json") return json({ yaml: exported.definition, warnings: exported.warnings });
+    return new Response(exported.definition, {
       headers: {
-        "Content-Type": "application/yaml; charset=utf-8",
-        "X-Goose-Warnings": String(warnings.length),
+        "Content-Type": `${exported.contentType}; charset=utf-8`,
+        "Content-Disposition": `inline; filename="${exported.filename}"`,
+        "X-Export-Warnings": String(exported.warnings.length),
       },
     });
   },
@@ -214,7 +228,7 @@ export const importGooseRecipe = defineRoute({
     422: { description: "The recipe does not map to a valid agent spec." },
   },
   handler: async ({ body }) => {
-    const { spec, warnings } = fromGooseRecipe(parseRecipeYaml(body));
+    const { spec, warnings } = agentExporter("goose").parse(parseRecipeYaml(body));
     const service = await agentService();
     const { record } = await service.import(spec);
     return json({ record: toRecordDto(record), warnings }, 201);
@@ -247,8 +261,9 @@ export const runtimeStatus = defineRoute({
   responses: {
     200: { description: "Runner status.", schema: runtimeStatusDto },
   },
-  handler: async () => {
-    const runner = await agentRunner();
+  query: z.object({ runtime: z.enum(RUNTIMES).default("goose") }),
+  handler: async ({ query }) => {
+    const runner = await agentRunner(query.runtime);
     return json(await runner.status());
   },
 });
@@ -272,12 +287,9 @@ export const runAgent = defineRoute({
     503: { description: "The runtime is unavailable." },
   },
   handler: async ({ params, body, request }) => {
-    const service = await agentService();
-    const record = await service.get(params.id);
-    const { yaml } = toGooseRecipe(record.spec);
-    const runner = await agentRunner();
+    const runs = await runService();
     return sseResponse(
-      (signal) => runner.run({ definition: yaml, params: body.params, prompt: body.prompt }, signal),
+      (signal) => runs.run(params.id, { params: body.params, prompt: body.prompt, environment: body.environment }, signal),
       request,
     );
   },
@@ -300,12 +312,8 @@ export const buildAgentImage = defineRoute({
     404: { description: "No agent with this id." },
   },
   handler: async ({ params, body, request }) => {
-    const service = await agentService();
-    const record = await service.get(params.id);
-    const { yaml } = toGooseRecipe(record.spec);
-    const packager = await agentPackager();
-    const pkg = { agentId: params.id, definition: yaml, tag: body.tag ?? `uab/${params.id}:latest` };
-    return sseResponse((signal) => packager.build(pkg, signal), request);
+    const runs = await runService();
+    return sseResponse((signal) => runs.build(params.id, body.tag, signal), request);
   },
 });
 
@@ -322,11 +330,7 @@ export const agentImageContext = defineRoute({
     404: { description: "No agent with this id." },
   },
   handler: async ({ params }) => {
-    const service = await agentService();
-    const record = await service.get(params.id);
-    const { yaml } = toGooseRecipe(record.spec);
-    const packager = await agentPackager();
-    return json(packager.context({ agentId: params.id, definition: yaml, tag: `uab/${params.id}:latest` }));
+    return json(await (await runService()).buildContext(params.id));
   },
 });
 
@@ -393,5 +397,207 @@ export const streamEvents = defineRoute({
   handler: async ({ request }) => {
     const bus = agentEvents();
     return sseResponse((signal) => fromSubscription<AgentEvent>((push) => bus.subscribe(push), signal), request);
+  },
+});
+
+// ---------------------------------------------------------------- environment
+
+const envNameParams = z.object({ key: envKeySchema.meta({ description: "Variable name, UPPER_SNAKE_CASE." }) });
+
+export const listEnvironment = defineRoute({
+  method: "get",
+  path: "/environment",
+  operationId: "listEnvironment",
+  summary: "List environment variables",
+  description: "The variables with masked values for sensitive entries, and the source they are stored in.",
+  tags: ["Environment"],
+  responses: {
+    200: { description: "Source and variables.", schema: environmentListingDto },
+  },
+  handler: async () => {
+    const store = await environmentStore();
+    return json({ source: store.describe(), variables: (await store.list()).map(toEnvVarDto) });
+  },
+});
+
+export const setEnvironmentVariable = defineRoute({
+  method: "put",
+  path: "/environment/{key}",
+  operationId: "setEnvironmentVariable",
+  summary: "Create or replace an environment variable",
+  description: "The key comes from the path. Sensitive values are write-only: listings return them masked.",
+  tags: ["Environment"],
+  params: envNameParams,
+  body: envVarInputDto,
+  responses: {
+    200: { description: "The saved variable.", schema: envVarDto },
+  },
+  handler: async ({ params, body }) => {
+    const store = await environmentStore();
+    return json(toEnvVarDto(await store.set({ ...body, key: params.key })));
+  },
+});
+
+export const deleteEnvironmentVariable = defineRoute({
+  method: "delete",
+  path: "/environment/{key}",
+  operationId: "deleteEnvironmentVariable",
+  summary: "Delete an environment variable",
+  tags: ["Environment"],
+  params: envNameParams,
+  responses: {
+    204: { description: "Deleted." },
+  },
+  handler: async ({ params }) => {
+    await (await environmentStore()).remove(params.key);
+    return new Response(null, { status: 204 });
+  },
+});
+
+export const resolveEnvironment = defineRoute({
+  method: "post",
+  path: "/environment/resolve",
+  operationId: "resolveEnvironment",
+  summary: "Resolve environment values",
+  description:
+    "Plain values of the given keys for one environment, as a run or build receives them. Returns secrets in plaintext, so it requires the `environment:read` scope.",
+  tags: ["Environment"],
+  scopes: ["environment:read"],
+  body: resolveEnvironmentRequestDto,
+  responses: {
+    200: { description: "Values found, and the keys that have no value in that environment.", schema: resolveEnvironmentResultDto },
+  },
+  handler: async ({ body }) => {
+    const store = await environmentStore();
+    return json(await store.resolve(body.environment, body.keys));
+  },
+});
+
+// ---------------------------------------------------------------- library
+
+const LIBRARY_ROUTE_KINDS = ["tools", "skills", "capabilities"] as const;
+const SINGULAR_KIND: Record<(typeof LIBRARY_ROUTE_KINDS)[number], LibraryKind> = {
+  tools: "tool",
+  skills: "skill",
+  capabilities: "capability",
+};
+type AnyLibraryItem = Tool | Skill | LibraryCapability;
+
+const libraryKindParams = z.object({
+  kind: z.enum(LIBRARY_ROUTE_KINDS).meta({ description: "The library collection: tools, skills or capabilities." }),
+});
+const libraryItemParams = libraryKindParams.extend({
+  name: z.string().min(1).meta({ description: "Item name (lowercase slug)." }),
+});
+
+function libraryCollection(repository: LibraryRepository, kind: LibraryKind): LibraryCollection<AnyLibraryItem> {
+  const collections = { tool: repository.tools, skill: repository.skills, capability: repository.capabilities };
+  return collections[kind];
+}
+
+/** Validates a library body against the schema of its kind; its name must be the one in the path (400 otherwise). */
+function parseLibraryItem(kind: LibraryKind, name: string, body: unknown): AnyLibraryItem {
+  const item: AnyLibraryItem = librarySchemas[kind].parse(body);
+  if (item.name !== name) {
+    throw new z.ZodError([
+      { code: "custom", path: ["name"], message: `The name "${item.name}" must match the path name "${name}".`, input: body },
+    ]);
+  }
+  return item;
+}
+
+export const listLibraryItems = defineRoute({
+  method: "get",
+  path: "/library/{kind}",
+  operationId: "listLibraryItems",
+  summary: "List library items",
+  description: "Every item of one library collection, with its timestamps.",
+  tags: ["Library"],
+  params: libraryKindParams,
+  responses: {
+    200: { description: "Records of the collection.", schema: z.array(libraryRecordDto) },
+  },
+  handler: async ({ params }) => {
+    const records = await libraryCollection(await libraryRepository(), SINGULAR_KIND[params.kind]).list();
+    return json(records.map(toLibraryRecordDto));
+  },
+});
+
+export const getLibraryItem = defineRoute({
+  method: "get",
+  path: "/library/{kind}/{name}",
+  operationId: "getLibraryItem",
+  summary: "Get a library item",
+  tags: ["Library"],
+  params: libraryItemParams,
+  responses: {
+    200: { description: "The item and its timestamps.", schema: libraryRecordDto },
+    404: { description: "No item with this name in the collection." },
+  },
+  handler: async ({ params }) => {
+    const record = await libraryCollection(await libraryRepository(), SINGULAR_KIND[params.kind]).get(params.name);
+    return json(toLibraryRecordDto(record));
+  },
+});
+
+export const saveLibraryItem = defineRoute({
+  method: "put",
+  path: "/library/{kind}/{name}",
+  operationId: "saveLibraryItem",
+  summary: "Create or replace a library item",
+  description:
+    "The body is the item itself, validated against the schema of its kind (tool, skill or capability). Its `name` must equal the path name.",
+  tags: ["Library"],
+  params: libraryItemParams,
+  body: z.unknown().meta({ description: "The library item: a tool, skill or capability document, depending on {kind}." }),
+  responses: {
+    200: { description: "The saved item.", schema: libraryRecordDto },
+    400: { description: "The body is not valid for this kind, or its name differs from the path." },
+    422: { description: "The item fails its schema." },
+  },
+  handler: async ({ params, body }) => {
+    const kind = SINGULAR_KIND[params.kind];
+    const item = parseLibraryItem(kind, params.name, body);
+    const record = await libraryCollection(await libraryRepository(), kind).save(item);
+    return json(toLibraryRecordDto(record));
+  },
+});
+
+export const deleteLibraryItem = defineRoute({
+  method: "delete",
+  path: "/library/{kind}/{name}",
+  operationId: "deleteLibraryItem",
+  summary: "Delete a library item",
+  tags: ["Library"],
+  params: libraryItemParams,
+  responses: {
+    204: { description: "Deleted." },
+    404: { description: "No item with this name in the collection." },
+  },
+  handler: async ({ params }) => {
+    await libraryCollection(await libraryRepository(), SINGULAR_KIND[params.kind]).remove(params.name);
+    return new Response(null, { status: 204 });
+  },
+});
+
+// ---------------------------------------------------------------- runtime catalog
+
+export const getLeleCatalog = defineRoute({
+  method: "get",
+  path: "/runtimes/lele/catalog",
+  operationId: "getLeleCatalog",
+  summary: "Lele catalog",
+  description: "What the lele harness offers to agents: tool groups, skills, and the limitations the UI should state.",
+  tags: ["Runtime"],
+  responses: {
+    200: { description: "The catalog.", schema: runtimeCatalogDto },
+  },
+  handler: async () => {
+    const catalog = await runtimeCatalog();
+    return json({
+      toolGroups: await catalog.toolGroups(),
+      skills: await catalog.skills(),
+      limitations: catalog.limitations(),
+    });
   },
 });

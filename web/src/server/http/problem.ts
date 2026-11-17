@@ -8,6 +8,10 @@ import {
   InvalidAgentDocumentError,
   InvalidAgentIdError,
   ForbiddenError,
+  EnvironmentStoreError,
+  InvalidLibraryItemError,
+  LibraryItemNotFoundError,
+  ReadOnlyAgentError,
   RuntimeUnavailableError,
   UnauthorizedError,
 } from "@/core/shared/errors";
@@ -60,6 +64,12 @@ export function toProblem(error: unknown, request: Request): Response {
     return problem(401, "Unauthorized", error.message, undefined, { "WWW-Authenticate": "Bearer" });
   }
   if (error instanceof ForbiddenError) return problem(403, "Forbidden", error.message);
+  if (error instanceof LibraryItemNotFoundError) return problem(404, "Library item not found", error.message);
+  if (error instanceof InvalidLibraryItemError) {
+    return problem(422, "Invalid library item", error.message, error.issues.map((m) => ({ path: "", message: m })));
+  }
+  if (error instanceof EnvironmentStoreError) return problem(409, "Environment store refused the operation", error.message);
+  if (error instanceof ReadOnlyAgentError) return problem(409, "Agent is read-only", error.message);
 
   console.error(error);
   return problem(500, "Internal error", error instanceof Error ? error.message : String(error));

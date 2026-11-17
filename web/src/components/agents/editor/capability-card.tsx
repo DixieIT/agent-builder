@@ -5,6 +5,7 @@ import { ToolInspector } from "@/components/agents/tool-inspector";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { CAPABILITY_CATALOG, type Capability, type GooseExtensionArgs, type McpArgs, type McpStdioArgs } from "@/core/agents/agent-spec";
+import { EnvKeysPicker } from "./env-keys-picker";
 import { CodecTextarea, Field, Hint, IconButton, NumberField, TextField, keyValueCodec, linesCodec, listCodec } from "./fields";
 
 type Props = {
@@ -69,7 +70,7 @@ function StdioForm({ id, args, onChange }: { id: string; args: McpStdioArgs; onC
         <CodecTextarea id={`${id}-env`} label="Environment" hint="KEY=value per line." value={args.env} {...keyValueCodec} onChange={(v) => set("env", v)} />
       </div>
       <div className="grid gap-4 sm:grid-cols-3">
-        <CodecTextarea id={`${id}-env-keys`} label="Secrets" hint="env_keys: read from the environment at run time." rows={1} value={args.env_keys} {...listCodec} onChange={(v) => set("env_keys", v)} />
+        <EnvKeysPicker id={`${id}-env-keys`} value={args.env_keys} onChange={(v) => set("env_keys", v)} />
         <TextField id={`${id}-cwd`} label="Working directory" value={args.cwd} onChange={(v) => set("cwd", v)} mono />
         <NumberField id={`${id}-timeout`} label="Timeout (s)" value={args.timeout} min={1} onChange={(v) => set("timeout", v)} placeholder="300" />
       </div>
@@ -92,7 +93,7 @@ function HttpForm({ id, args, onChange }: { id: string; args: McpArgs; onChange:
         <CodecTextarea id={`${id}-env`} label="Environment" hint="KEY=value per line." value={args.env} {...keyValueCodec} onChange={(v) => set("env", v)} />
       </div>
       <div className="grid gap-4 sm:grid-cols-2">
-        <CodecTextarea id={`${id}-env-keys`} label="Secrets" hint="env_keys: read from the environment at run time." rows={1} value={args.env_keys} {...listCodec} onChange={(v) => set("env_keys", v)} />
+        <EnvKeysPicker id={`${id}-env-keys`} value={args.env_keys} onChange={(v) => set("env_keys", v)} />
         <NumberField id={`${id}-timeout`} label="Timeout (s)" value={args.timeout} min={1} onChange={(v) => set("timeout", v)} placeholder="300" />
       </div>
       <ToolInspector server={{ kind: "MCP", args }} allowedTools={args.allowed_tools} onAllowedToolsChange={(tools) => set("allowed_tools", tools)} />

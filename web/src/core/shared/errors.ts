@@ -47,3 +47,36 @@ export class UnauthorizedError extends DomainError {}
 
 /** The caller is known but lacks the scope the operation needs. Maps to 403. */
 export class ForbiddenError extends DomainError {}
+
+export class LibraryItemNotFoundError extends DomainError {
+  constructor(
+    readonly kind: "tool" | "skill" | "capability",
+    readonly name: string,
+  ) {
+    super(`${kind} "${name}" does not exist in the library.`);
+  }
+}
+
+/** A library item fails its schema, on save or when read back from the store. */
+export class InvalidLibraryItemError extends DomainError {
+  constructor(
+    readonly kind: "tool" | "skill" | "capability",
+    readonly name: string,
+    readonly issues: string[],
+  ) {
+    super(`Library ${kind} "${name}" is not valid: ${issues.join("; ")}`);
+  }
+}
+
+/** The environment store refused the operation, e.g. writing without UAB_SECRET_KEY or a value that cannot be decrypted. */
+export class EnvironmentStoreError extends DomainError {}
+
+/** The agent is defined in a layer this store cannot write (lele: bundled or global agents). */
+export class ReadOnlyAgentError extends DomainError {
+  constructor(
+    readonly id: string,
+    readonly location: string,
+  ) {
+    super(`Agent "${id}" is defined in the ${location} layer and is read-only here.`);
+  }
+}

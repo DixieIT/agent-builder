@@ -8,7 +8,7 @@ import type {
   ProvisionableStore,
   StoreCheck,
 } from "@/core/agents/agent-repository.port";
-import { type AgentSpec, agentSpecSchema } from "@/core/agents/agent-spec";
+import { type AgentSpec, agentSpecSchema, capabilityCount } from "@/core/agents/agent-spec";
 import {
   AgentConflictError,
   AgentNotFoundError,
@@ -80,7 +80,7 @@ function toSummary(doc: AgentDocument): AgentSummary {
     name: spec?.name ?? (typeof raw.name === "string" ? raw.name : ""),
     description: spec?.description ?? (typeof raw.description === "string" ? raw.description : ""),
     model: spec?.model,
-    capabilityCount: spec?.capabilities.length ?? 0,
+    capabilityCount: spec ? capabilityCount(spec) : 0,
     updatedAt: doc.updatedAt,
     ...(problems.length > 0 ? { problem: problems.join("; ") } : {}),
   };

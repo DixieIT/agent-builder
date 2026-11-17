@@ -6,7 +6,7 @@ import path from "node:path";
 import { parse, stringify } from "yaml";
 
 import { isAgentId, type AgentId } from "@/core/agents/agent-id";
-import { agentSpecSchema, type AgentSpec } from "@/core/agents/agent-spec";
+import { agentSpecSchema, capabilityCount, type AgentSpec } from "@/core/agents/agent-spec";
 import type { AgentRecord, AgentRepository, AgentSummary } from "@/core/agents/agent-repository.port";
 import {
   AgentConflictError,
@@ -169,7 +169,7 @@ export class FsAgentRepository implements AgentRepository {
         name: spec.name,
         description: spec.description,
         ...(spec.model ? { model: spec.model } : {}),
-        capabilityCount: spec.capabilities.length,
+        capabilityCount: capabilityCount(spec),
         updatedAt,
       };
     } catch (error) {

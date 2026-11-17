@@ -104,7 +104,8 @@ export const subRecipeSchema = z.strictObject({
   sequential_when_repeated: z.boolean().optional(),
 });
 
-export const agentSpecSchema = z.strictObject({
+export const gooseAgentSpecSchema = z.strictObject({
+  runtime: z.literal("goose").default("goose"),
   name: identifier,
   description: z.string().default(""),
   model: z.string().regex(/^[\w.-]+:[\w./:@-]+$/, 'Use "provider:model", e.g. anthropic:claude-opus-5-5').optional(),
@@ -120,7 +121,38 @@ export const agentSpecSchema = z.strictObject({
   activities: z.array(z.string()).optional(),
 });
 
-export type AgentSpec = z.infer<typeof agentSpecSchema>;
+/** lele sub-agent grant: a tool, tool group, plugin, extension or skill name. */
+/** active = granted, disabled = removed (also from the always-on floor), available = listed but not granted (kept as written). */
+export const LELE_GRANTS = ["active", "disabled", "available"] as const;
+export type LeleGrant = (typeof LELE_GRANTS)[number];
+
+/**
+ * lele sub-agent (`.lele/agents/<name>/AGENTS.md`): exactly the frontmatter keys lele reads, plus the body.
+ * `tools` maps a tool, group, plugin, extension or skill name to active/disabled; bash, read-file and todo are always granted unless disabled.
+ */
+export const leleAgentSpecSchema = z.strictObject({
+  runtime: z.literal("lele"),
+  name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,39}$/, "Use lowercase letters, digits and -, up to 40 characters."),
+  description: z.string().default(""),
+  model: z.string().regex(/^[\w.-]+(:[\w./:@-]+)?$|^[\w.-]+\/[\w./:@-]+$/, 'Use "provider:model" or an OpenRouter slug like deepseek/deepseek-v4-flash').optional(),
+  instructions: z.string().default(""),
+  tools: z.record(z.string().min(1), z.enum(LELE_GRANTS)).default({}),
+  hidden: z.boolean().optional(),
+  simple: z.boolean().optional(),
+});
+
+export const RUNTIMES = ["goose", "lele"] as const;
+export type Runtime = (typeof RUNTIMES)[number];
+
+/** A spec without `runtime` is a Goose agent (the original format). */
+export const agentSpecSchema = z.preprocess(
+  (value) => (value && typeof value === "object" && !("runtime" in value) ? { ...value, runtime: "goose" } : value),
+  z.discriminatedUnion("runtime", [gooseAgentSpecSchema, leleAgentSpecSchema]),
+);
+
+export type GooseAgentSpec = z.infer<typeof gooseAgentSpecSchema>;
+export type LeleAgentSpec = z.infer<typeof leleAgentSpecSchema>;
+export type AgentSpec = GooseAgentSpec | LeleAgentSpec;
 export type CapabilityEntry = z.infer<typeof capabilityEntrySchema>;
 export type DepsSchema = z.infer<typeof depsSchemaSchema>;
 export type Retry = z.infer<typeof retrySchema>;
@@ -140,7 +172,12 @@ export function fromCapability(capability: Capability): CapabilityEntry {
 }
 
 export function capabilities(spec: AgentSpec): Capability[] {
-  return spec.capabilities.map(toCapability);
+  return spec.runtime === "goose" ? spec.capabilities.map(toCapability) : [];
+}
+
+/** Number of things the agent can use: Goose extensions, or lele grants that are active. */
+export function capabilityCount(spec: AgentSpec): number {
+  return spec.runtime === "goose" ? spec.capabilities.length : Object.values(spec.tools).filter((g) => g === "active").length;
 }
 
 /** What the "Add capability" menu offers. Each item is a Goose extension type. */
@@ -150,8 +187,12 @@ export const CAPABILITY_CATALOG: { kind: CapabilityKind; label: string; summary:
   { kind: "GooseExtension", label: "Goose extension", summary: "An extension that ships with Goose, e.g. developer.", defaults: { type: "builtin", name: "developer" } },
 ];
 
-export function newAgentSpec(name: string): AgentSpec {
-  return agentSpecSchema.parse({ name, description: "", model: "anthropic:claude-opus-5-5", instructions: "", capabilities: [] });
+export function newAgentSpec(name: string, runtime: Runtime = "goose"): AgentSpec {
+  if (runtime === "lele") {
+    const slug = name.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "agent";
+    return leleAgentSpecSchema.parse({ runtime, name: slug, instructions: "", tools: {} });
+  }
+  return gooseAgentSpecSchema.parse({ runtime, name, description: "", model: "anthropic:claude-opus-5-5", instructions: "", capabilities: [] });
 }
 
 export function instructionsText(spec: { instructions?: string | string[] }): string {
@@ -164,10 +205,35 @@ const BUILTIN_VARS = new Set(["recipe_dir"]);
 /** Template variables used in instructions, prompt and activities, e.g. {{user_name}}. */
 export function templateVariables(spec: AgentSpec): string[] {
   const found = new Set<string>();
+  if (spec.runtime !== "goose") return [];
   for (const text of [instructionsText(spec), spec.prompt, ...(spec.activities ?? [])]) {
     for (const match of (text ?? "").matchAll(TEMPLATE_VAR)) if (!BUILTIN_VARS.has(match[1])) found.add(match[1]);
   }
   return [...found];
+}
+
+/** Provider prefix -> the variable holding its API key. */
+const PROVIDER_KEYS: Record<string, string> = {
+  anthropic: "ANTHROPIC_API_KEY",
+  openai: "OPENAI_API_KEY",
+  google: "GOOGLE_API_KEY",
+  gemini: "GEMINI_API_KEY",
+  openrouter: "OPENROUTER_API_KEY",
+  groq: "GROQ_API_KEY",
+  mistral: "MISTRAL_API_KEY",
+  deepseek: "DEEPSEEK_API_KEY",
+  xai: "XAI_API_KEY",
+};
+
+/** Variables an agent needs at run time: its provider key plus every env_keys entry of its capabilities. */
+export function requiredEnvKeys(spec: AgentSpec): string[] {
+  const keys = new Set<string>();
+  const provider = spec.model?.includes(":") ? spec.model.split(":")[0] : spec.model ? "openrouter" : undefined;
+  if (provider && PROVIDER_KEYS[provider]) keys.add(PROVIDER_KEYS[provider]);
+  for (const capability of capabilities(spec)) {
+    if (capability.kind !== "GooseExtension") for (const key of capability.args.env_keys ?? []) keys.add(key);
+  }
+  return [...keys];
 }
 
 export interface SpecIssue {
@@ -192,6 +258,10 @@ export function validateAgentSpec(input: unknown): { spec?: AgentSpec; issues: S
   const issues: SpecIssue[] = [];
   const error = (path: string, message: string) => issues.push({ path, message, severity: "error" });
 
+  if (spec.runtime === "lele") {
+    if (!spec.instructions.trim()) error("instructions", "Add instructions; they become the agent's system prompt.");
+    return { spec, issues };
+  }
 
   if (!instructionsText(spec).trim() && !spec.prompt?.trim()) error("instructions", "Add instructions or a prompt.");
   if (!spec.model) issues.push({ path: "model", message: "No model set; Goose uses its configured default.", severity: "warning" });

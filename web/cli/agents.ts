@@ -8,63 +8,81 @@
  *   bun run agents chat <agentId> [--param k=v ...]     each line is one run; "exit" quits
  *   bun run agents verify                               check the MongoDB agent store (AGENT_STORE=mongo)
  *   bun run agents init                                 create or update the MongoDB collection, validator and indexes
+ *   bun run agents dump <dir>                           write all agents and library items as a folder bundle
+ *   bun run agents import <path> [--dry-run]            import a tool/skill/capability/agent item, or a whole bundle
+ *   bun run agents library [tools|skills|capabilities]  list library items (SQLite)
  *   bun run agents help                                 show usage
  *
  * Options: --uri <mongodb-uri>, --db <database> override MONGODB_URI / MONGODB_DB.
  */
 import { createInterface } from "node:readline";
+import path from "node:path";
 import { compose, type CliComposition, type CliOverrides } from "./compose";
 import type { AgentSummary, StoreCheck } from "../src/core/agents/agent-repository.port";
-import { capabilities, type AgentSpec } from "../src/core/agents/agent-spec";
-import type { AgentRunner, RunRequest } from "../src/core/runtime/agent-runner.port";
+import { parseAgentId } from "../src/core/agents/agent-id";
+import { ENVIRONMENTS, type Environment } from "../src/core/environment/environment";
+import type { BundleContent } from "../src/core/library/bundle.port";
+import type { LibraryItem, LibraryKind } from "../src/core/library/library";
+import type { LibraryRepository } from "../src/core/library/library-repository.port";
+import type { AgentRunner, RunEvent } from "../src/core/runtime/agent-runner.port";
 
-const COMMANDS = ["list", "run", "chat", "verify", "init", "help"] as const;
+const COMMANDS = ["list", "run", "chat", "verify", "init", "dump", "import", "library", "help"] as const;
 
 const USAGE = `Usage: bun run agents <command> [options]
 
 Commands:
   list                    List stored agents
-  run <agentId>           Run an agent once on the Goose runtime
+  run <agentId>           Run an agent once on its runtime (Goose or lele)
   chat <agentId>          Chat with an agent: each line is one run, "exit" quits
   verify                  Check the MongoDB agent store (AGENT_STORE=mongo); exits 1 on failure
   init                    Create or update the MongoDB collection, validator and indexes, then check
+  dump <dir>              Write all agents and library items to <dir> as a folder bundle
+  import <path>           Import one item (tools/<name>, skills/<name>, capabilities/<name>.yaml,
+                          agents/<id>) or a whole bundle folder into the library and agent store
+  library [kind]          List library items (kind: tools, skills or capabilities; default all)
   help                    Show this message
 
 Run and chat options:
   --param key=value       Template variable for the agent (repeatable)
   --prompt "text"         Starting prompt for run (chat uses each line instead)
-  --yaml                  Print the Goose recipe and exit
+  --env <name>            Environment whose variables the run gets: development (default), preview, production
+  --yaml                  Print the harness definition (Goose recipe or lele AGENTS.md) and exit
+
+Import options:
+  --dry-run               Read and validate the bundle, save nothing
 
 Environment:
-  AGENT_STORE             fs (default; AGENTS_DIR, else ../agents) or mongo (MONGODB_URI, MONGODB_DB)
+  AGENT_STORE             fs (default; AGENTS_DIR, else ../agents), mongo (MONGODB_URI, MONGODB_DB)
+                          or sqlite (UAB_DB, UAB_SECRET_KEY)
+  UAB_DB                  SQLite file for the library (and for agents with AGENT_STORE=sqlite)
+                          (default data/uab.sqlite in the repo root)
+  UAB_SECRET_KEY          Secret for encrypted values in the SQLite store
   GOOSE_BIN               goose executable (default "goose")
   Provider keys (ANTHROPIC_API_KEY, OPENAI_API_KEY, GOOGLE_API_KEY) and MCP env_keys are checked before a run.
 
 Flags --uri and --db override the MongoDB environment.`;
 
-const PROVIDER_KEYS: Record<string, string> = {
-  anthropic: "ANTHROPIC_API_KEY",
-  openai: "OPENAI_API_KEY",
-  google: "GOOGLE_API_KEY",
-};
-
-
 interface Options {
   command: string;
+  /** The first argument after the command: an agent id, a bundle path or a library kind. */
+  arg?: string;
   agentId?: string;
   overrides: CliOverrides;
   params: Record<string, string>;
   prompt?: string;
   yaml: boolean;
+  dryRun: boolean;
+  environment: Environment;
 }
 
-const VALUE_FLAGS = new Set(["--uri", "--db", "--param", "--prompt"]);
+const VALUE_FLAGS = new Set(["--uri", "--db", "--param", "--prompt", "--env"]);
 
 function parseArgs(argv: string[]): Options {
   const positional: string[] = [];
   const flags = new Map<string, string>();
   const params: Record<string, string> = {};
   let yaml = false;
+  let dryRun = false;
   let help = false;
 
   for (let i = 0; i < argv.length; i++) {
@@ -75,6 +93,10 @@ function parseArgs(argv: string[]): Options {
     }
     if (arg === "--yaml") {
       yaml = true;
+      continue;
+    }
+    if (arg === "--dry-run") {
+      dryRun = true;
       continue;
     }
     const eq = arg.startsWith("--") ? arg.indexOf("=") : -1;
@@ -97,13 +119,18 @@ function parseArgs(argv: string[]): Options {
   }
 
   const command = help ? "help" : (positional[0] ?? "help");
+  const environment = (flags.get("--env") ?? "development") as Environment;
+  if (!ENVIRONMENTS.includes(environment)) throw new Error(`--env must be one of ${ENVIRONMENTS.join(", ")}.`);
   return {
     command,
+    arg: positional[1],
     agentId: positional[1],
     overrides: { uri: flags.get("--uri"), db: flags.get("--db") },
     params,
     prompt: flags.get("--prompt"),
     yaml,
+    dryRun,
+    environment,
   };
 }
 
@@ -154,35 +181,6 @@ function printAgents(rows: AgentSummary[]): void {
 
 // ---- run preparation ---------------------------------------------------------------------------
 
-/** Provider keys and MCP env_keys the spec needs, so missing secrets are reported before a run. */
-function requiredKeys(spec: AgentSpec): string[] {
-  const keys = new Set<string>();
-  const models: string[] = spec.model ? [spec.model] : [];
-  for (const capability of capabilities(spec)) {
-    if (capability.kind !== "GooseExtension") for (const key of capability.args.env_keys ?? []) keys.add(key);
-  }
-  for (const model of models) {
-    const provider = model.split(":")[0];
-    const key = provider.startsWith("google") ? PROVIDER_KEYS.google : PROVIDER_KEYS[provider];
-    if (key) keys.add(key);
-  }
-  return [...keys];
-}
-
-/** Loads the agent, builds its Goose recipe, prints warnings and reports missing secrets. Never blocks. */
-async function prepare(cli: CliComposition, agentId: string): Promise<{ yaml: string }> {
-  const record = await cli.service.get(agentId);
-  const { toGooseRecipe } = await import("../src/adapters/goose/goose-recipe");
-  const recipe = toGooseRecipe(record.spec);
-  for (const message of recipe.warnings) warn(message);
-
-  const { missing } = await cli.credentials.resolve(requiredKeys(record.spec));
-  if (missing.length > 0) {
-    warn(`Not set in ${cli.credentials.describe()}: ${missing.join(", ")}. The run may fail.`);
-  }
-  return { yaml: recipe.yaml };
-}
-
 /** Returns an error message when the runner cannot run, otherwise null. */
 async function checkRunner(runner: AgentRunner): Promise<string | null> {
   const runtime = await runner.status();
@@ -192,12 +190,15 @@ async function checkRunner(runner: AgentRunner): Promise<string | null> {
 }
 
 /** Streams one run to the terminal. Returns the exit code for that run. */
-async function streamRun(runner: AgentRunner, request: RunRequest, signal: AbortSignal): Promise<number> {
+async function streamRun(events: AsyncIterable<RunEvent>, signal: AbortSignal): Promise<number> {
   let finished: { exitCode: number | null } | undefined;
   let failure: string | undefined;
 
-  for await (const event of runner.run(request, signal)) {
+  for await (const event of events) {
     switch (event.type) {
+      case "run.tool":
+        status(`  -> ${event.name}${event.output === undefined ? "" : " done"}`);
+        break;
       case "run.started":
         status(`▸ ${event.runner} run ${event.runId}`);
         break;
@@ -236,11 +237,11 @@ async function list(cli: CliComposition): Promise<number> {
 }
 
 async function storeChecks(cli: CliComposition, command: "verify" | "init"): Promise<number> {
-  if (!cli.mongo) {
-    fail(`verify/init apply to AGENT_STORE=mongo (current store: ${cli.store}).`);
+  if (!cli.provisionable) {
+    fail(`verify/init apply to the mongo and sqlite stores (current store: ${cli.store}).`);
     return 1;
   }
-  const checks = command === "init" ? await cli.mongo.provision() : await cli.mongo.verify();
+  const checks = command === "init" ? await cli.provisionable.provision() : await cli.provisionable.verify();
   printChecks(checks);
   const failed = checks.filter((check) => !check.ok).length;
   console.log(failed === 0 ? "\nAll checks passed." : `\n${failed} check(s) failed.`);
@@ -249,12 +250,13 @@ async function storeChecks(cli: CliComposition, command: "verify" | "init"): Pro
 
 async function runOnce(cli: CliComposition, options: Options): Promise<number> {
   const agentId = requireAgentId(options);
-  const { yaml } = await prepare(cli, agentId);
+  const runs = await cli.runs();
+  const exported = await runs.export(agentId);
   if (options.yaml) {
-    process.stdout.write(yaml.endsWith("\n") ? yaml : `${yaml}\n`);
+    process.stdout.write(exported.definition.endsWith("\n") ? exported.definition : `${exported.definition}\n`);
     return 0;
   }
-  const runner = await cli.runner();
+  const runner = await cli.runner(exported.spec.runtime);
   const unavailable = await checkRunner(runner);
   if (unavailable) {
     fail(unavailable);
@@ -265,7 +267,8 @@ async function runOnce(cli: CliComposition, options: Options): Promise<number> {
   const onInterrupt = () => controller.abort();
   process.on("SIGINT", onInterrupt);
   try {
-    return await streamRun(runner, { definition: yaml, params: options.params, prompt: options.prompt }, controller.signal);
+    const events = runs.run(agentId, { params: options.params, prompt: options.prompt, environment: options.environment }, controller.signal);
+    return await streamRun(events, controller.signal);
   } finally {
     process.off("SIGINT", onInterrupt);
   }
@@ -273,8 +276,9 @@ async function runOnce(cli: CliComposition, options: Options): Promise<number> {
 
 async function chat(cli: CliComposition, options: Options): Promise<number> {
   const agentId = requireAgentId(options);
-  const { yaml } = await prepare(cli, agentId);
-  const runner = await cli.runner();
+  const runs = await cli.runs();
+  const exported = await runs.export(agentId);
+  const runner = await cli.runner(exported.spec.runtime);
   const unavailable = await checkRunner(runner);
   if (unavailable) {
     fail(unavailable);
@@ -302,7 +306,8 @@ async function chat(cli: CliComposition, options: Options): Promise<number> {
     if (text) {
       active = new AbortController();
       try {
-        await streamRun(runner, { definition: yaml, params: options.params, prompt: text }, active.signal);
+        const signal = active.signal;
+        await streamRun(runs.run(agentId, { params: options.params, prompt: text, environment: options.environment }, signal), signal);
       } finally {
         active = undefined;
       }
@@ -316,6 +321,149 @@ async function chat(cli: CliComposition, options: Options): Promise<number> {
 function requireAgentId(options: Options): string {
   if (!options.agentId) throw new Error(`"${options.command}" needs an agent id, e.g. bun run agents ${options.command} my-agent.`);
   return options.agentId;
+}
+
+// ---- bundles and library -----------------------------------------------------------------------
+
+const LIBRARY_KINDS: Record<string, LibraryKind> = {
+  tools: "tool",
+  skills: "skill",
+  capabilities: "capability",
+};
+
+interface LibraryRow {
+  name: string;
+  detail: string;
+  description: string;
+  updatedAt: Date;
+}
+
+function reason(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function allLibraryItems(library: LibraryRepository): Promise<LibraryItem[]> {
+  const [tools, skills, capabilities] = await Promise.all([library.tools.list(), library.skills.list(), library.capabilities.list()]);
+  return [
+    ...tools.map(({ item }) => ({ kind: "tool" as const, item })),
+    ...skills.map(({ item }) => ({ kind: "skill" as const, item })),
+    ...capabilities.map(({ item }) => ({ kind: "capability" as const, item })),
+  ];
+}
+
+async function dump(cli: CliComposition, options: Options): Promise<number> {
+  if (!options.arg) throw new Error(`"dump" needs a directory, e.g. bun run agents dump ./bundle.`);
+  const agents: BundleContent["agents"] = [];
+  for (const summary of await cli.service.list()) {
+    if (summary.problem) {
+      warn(`Skipped agent ${summary.id}: ${summary.problem}`);
+      continue;
+    }
+    const record = await cli.service.get(summary.id);
+    agents.push({ id: record.id, spec: record.spec });
+  }
+  const items = await allLibraryItems(await cli.library());
+  const written = await cli.bundle.dump(options.arg, { agents, items });
+  console.log(`Wrote ${agents.length} agent(s) and ${items.length} library item(s) to ${path.resolve(options.arg)} (${written.length} files).`);
+  return 0;
+}
+
+async function saveLibraryItem(library: LibraryRepository, entry: LibraryItem): Promise<void> {
+  switch (entry.kind) {
+    case "tool":
+      await library.tools.save(entry.item);
+      return;
+    case "skill":
+      await library.skills.save(entry.item);
+      return;
+    case "capability":
+      await library.capabilities.save(entry.item);
+      return;
+  }
+}
+
+/** One line per item. Items are validated by the codec when the bundle is read; saving reports store errors. */
+async function importBundle(cli: CliComposition, options: Options): Promise<number> {
+  if (!options.arg) throw new Error(`"import" needs a path, e.g. bun run agents import tools/search_docs.`);
+  const content = await cli.bundle.read(options.arg);
+  const library = options.dryRun ? undefined : await cli.library();
+  let failures = 0;
+
+  for (const entry of content.items) {
+    const label = `${entry.kind} ${entry.item.name}`;
+    if (!library) {
+      console.log(`✔ ${label}`);
+      continue;
+    }
+    try {
+      await saveLibraryItem(library, entry);
+      console.log(`✔ ${label}`);
+    } catch (error) {
+      failures++;
+      console.log(`✖ ${label}: ${reason(error)}`);
+    }
+  }
+
+  for (const { id, spec } of content.agents) {
+    const label = `agent ${id}`;
+    if (!options.dryRun) {
+      try {
+        const exists = await cli.repository.exists(parseAgentId(id));
+        const result = exists ? await cli.service.save(id, spec) : await cli.service.import(spec, id);
+        console.log(`✔ ${label}${exists ? " (replaced)" : ""}`);
+        for (const issue of result.issues) console.log(`  ! ${issue.path}: ${issue.message}`);
+      } catch (error) {
+        failures++;
+        console.log(`✖ ${label}: ${reason(error)}`);
+      }
+      continue;
+    }
+    console.log(`✔ ${label}`);
+  }
+
+  if (options.dryRun) console.log("Dry run: nothing was saved.");
+  return failures === 0 ? 0 : 1;
+}
+
+async function libraryRowsOf(library: LibraryRepository, kind: LibraryKind): Promise<LibraryRow[]> {
+  switch (kind) {
+    case "tool":
+      return library.tools
+        .list()
+        .then((rows) => rows.map(({ item, updatedAt }) => ({ name: item.name, detail: item.language, description: item.description, updatedAt })));
+    case "skill":
+      return library.skills
+        .list()
+        .then((rows) =>
+          rows.map(({ item, updatedAt }) => ({ name: item.name, detail: `${Object.keys(item.files).length} file(s)`, description: item.description, updatedAt })),
+        );
+    case "capability":
+      return library.capabilities
+        .list()
+        .then((rows) => rows.map(({ item, updatedAt }) => ({ name: item.name, detail: Object.keys(item.entry)[0], description: item.description, updatedAt })));
+  }
+}
+
+async function listLibrary(cli: CliComposition, options: Options): Promise<number> {
+  const wanted = options.arg;
+  if (wanted !== undefined && !(wanted in LIBRARY_KINDS)) {
+    throw new Error(`Unknown library kind "${wanted}"; use tools, skills or capabilities.`);
+  }
+  const library = await cli.library();
+  const kinds: [string, LibraryKind][] = Object.entries(LIBRARY_KINDS).filter(([name]) => wanted === undefined || name === wanted);
+  for (const [name, kind] of kinds) {
+    const rows = await libraryRowsOf(library, kind);
+    console.log(`${name} (${rows.length}) in SQLite`);
+    if (rows.length === 0) console.log("  none");
+    const width = {
+      name: Math.max(...rows.map((row) => row.name.length)),
+      detail: Math.max(...rows.map((row) => row.detail.length)),
+    };
+    for (const row of rows) {
+      console.log(`  ${row.name.padEnd(width.name)}  ${row.detail.padEnd(width.detail)}  ${row.updatedAt.toISOString()}  ${row.description}`);
+    }
+  }
+  return 0;
 }
 
 // ---- entry -------------------------------------------------------------------------------------
@@ -343,6 +491,12 @@ async function main(options: Options): Promise<number> {
         return await runOnce(cli, options);
       case "chat":
         return await chat(cli, options);
+      case "dump":
+        return await dump(cli, options);
+      case "import":
+        return await importBundle(cli, options);
+      case "library":
+        return await listLibrary(cli, options);
       default:
         return 1;
     }
