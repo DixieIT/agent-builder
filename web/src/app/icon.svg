@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <clipPath id="rose"><circle cx="512" cy="416" r="198"/></clipPath>
+    <clipPath id="ocean"><circle cx="613" cy="605" r="198"/></clipPath>
+  </defs>
+  <rect width="1024" height="1024" rx="224" fill="#131A28"/>
+  <circle cx="408" cy="606" r="196" fill="#CDB5F5"/>
+  <circle cx="613" cy="605" r="198" fill="#93D1FB"/>
+  <circle cx="512" cy="416" r="198" fill="#FFAAB0"/>
+  <g clip-path="url(#rose)">
+    <circle cx="408" cy="606" r="196" fill="#CDB5F5" stroke="#131A28" stroke-width="44"/>
+    <g clip-path="url(#ocean)">
+      <circle cx="408" cy="606" r="196" fill="#C4A0FA"/>
+    </g>
+  </g>
+  <g clip-path="url(#ocean)">
+    <circle cx="512" cy="416" r="209" fill="none" stroke="#6FB8F5" stroke-width="22"/>
+  </g>
+</svg>

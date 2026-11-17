@@ -1,0 +1,31 @@
+# deps (bun)
+node_modules/
+.bun/
+
+# next.js
+.next/
+out/
+next-env.d.ts
+*.tsbuildinfo
+
+# build
+dist/
+build/
+target/
+
+# env
+.env
+.env*.local
+
+# logs
+*.log
+
+# os / editors
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# vercel
+.vercel

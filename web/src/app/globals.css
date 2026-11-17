@@ -1,0 +1,167 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* Bubble design system: pastel bubbles on deep navy.
+   Brand hues are fixed; light mode uses deeper tints so text keeps 4.5:1 contrast. */
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains), ui-monospace, monospace;
+  --font-heading: var(--font-fredoka), var(--font-inter), ui-sans-serif, sans-serif;
+
+  /* Brand palette: bg-rose, text-lavender, from-ocean ... */
+  --color-rose: var(--rose);
+  --color-lavender: var(--lavender);
+  --color-ocean: var(--ocean);
+  --color-peach: var(--peach);
+  --color-mist: var(--mist);
+  --color-gold: var(--gold);
+  --color-navy: var(--navy);
+
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+:root {
+  /* Brand (same in both themes) */
+  --rose: #f4a6d3;      /* Iridescent Rose */
+  --lavender: #9b82d0;  /* Shimmering Lavender */
+  --ocean: #aee6e8;     /* Ocean Bubble */
+  --peach: #ffae8f;     /* Peach Glow */
+  --mist: #dce8f0;      /* Soapy Mist */
+  --gold: #f0dc96;      /* Glint of Gold */
+  --navy: #131a28;      /* Deep Navy */
+
+  --radius: 1rem;
+
+  /* Light: Soapy Mist ground (no pure white), deeper tints for readable text */
+  --background: #dce8f0;
+  --foreground: #131a28;
+  --card: #e6eff5;
+  --card-foreground: #131a28;
+  --popover: #eaf2f7;
+  --popover-foreground: #131a28;
+  --primary: #6e54b8;
+  --primary-foreground: #f4f8fb;
+  --secondary: #c8e9eb;
+  --secondary-foreground: #12494d;
+  --muted: #d0dee8;
+  --muted-foreground: #4a5670;
+  --accent: #f1d6e6;
+  --accent-foreground: #7a2357;
+  --destructive: #c4344f;
+  --border: #c3d2de;
+  --input: #c3d2de;
+  --ring: #9b82d0;
+  --chart-1: #7c63c4;
+  --chart-2: #2fa9b0;
+  --chart-3: #db6fae;
+  --chart-4: #f08a61;
+  --chart-5: #c9a22e;
+  --sidebar: #d4e2ec;
+  --sidebar-foreground: #131a28;
+  --sidebar-primary: #6e54b8;
+  --sidebar-primary-foreground: #f4f8fb;
+  --sidebar-accent: #f1d6e6;
+  --sidebar-accent-foreground: #7a2357;
+  --sidebar-border: #c3d2de;
+  --sidebar-ring: #9b82d0;
+}
+
+.dark {
+  /* Dark: the original swatch board, pastels on deep navy */
+  --background: #131a28;
+  --foreground: #e6eef5;
+  --card: #1a2234;
+  --card-foreground: #e6eef5;
+  --popover: #1a2234;
+  --popover-foreground: #e6eef5;
+  --primary: #b9a3ec;
+  --primary-foreground: #131a28;
+  --secondary: #222c42;
+  --secondary-foreground: #e6eef5;
+  --muted: #1e2738;
+  --muted-foreground: #9aa6bd;
+  --accent: #2a2545;
+  --accent-foreground: #e9dfff;
+  --destructive: #ff8a80;
+  --border: #2a3550;
+  --input: #2e3a56;
+  --ring: #9b82d0;
+  --chart-1: #9b82d0;
+  --chart-2: #aee6e8;
+  --chart-3: #f4a6d3;
+  --chart-4: #ffae8f;
+  --chart-5: #f0dc96;
+  --sidebar: #0f1522;
+  --sidebar-foreground: #e6eef5;
+  --sidebar-primary: #b9a3ec;
+  --sidebar-primary-foreground: #131a28;
+  --sidebar-accent: #2a2545;
+  --sidebar-accent-foreground: #e9dfff;
+  --sidebar-border: #2a3550;
+  --sidebar-ring: #9b82d0;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
+  }
+  h1, h2, h3, h4 {
+    @apply font-heading;
+    text-wrap: balance;
+  }
+}
+
+/* A soft iridescent sheen for hero surfaces; use sparingly. */
+@utility bubble-sheen {
+  background-image:
+    radial-gradient(60% 80% at 15% 20%, color-mix(in oklab, var(--rose) 28%, transparent), transparent 70%),
+    radial-gradient(50% 70% at 85% 30%, color-mix(in oklab, var(--ocean) 30%, transparent), transparent 70%),
+    radial-gradient(60% 80% at 50% 100%, color-mix(in oklab, var(--lavender) 26%, transparent), transparent 70%);
+}

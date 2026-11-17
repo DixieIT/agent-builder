@@ -1,0 +1,37 @@
+name: research_assistant
+description: A helpful research assistant.
+model: anthropic:claude-opus-5-5
+instructions: You are helping {{user_name}}. Always include a confidence score.
+prompt: Summarize what's in the project folder for {{user_name}}.
+model_settings:
+  temperature: 0.3
+capabilities:
+  - GooseExtension:
+      type: builtin
+      name: developer
+  - MCPStdio:
+      id: filesystem
+      description: Read files in the project folder.
+      command: npx
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "."]
+deps_schema:
+  type: object
+  properties:
+    user_name:
+      type: string
+      description: Who the agent is helping.
+  required: [user_name]
+output_schema:
+  type: object
+  properties:
+    answer:
+      type: string
+    confidence:
+      type: number
+  required: [answer, confidence]
+max_turns: 25
+retry:
+  max_retries: 3
+  checks:
+    - type: shell
+      command: test -n "$GOOSE_OUTPUT"
