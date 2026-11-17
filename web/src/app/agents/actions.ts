@@ -12,7 +12,9 @@ import {
 } from "@/core/agents/agent-spec";
 import { DomainError } from "@/core/shared/errors";
 import type { InspectionResult } from "@/core/tools/tool-inspector.port";
-import { agentRepository, toolInspector } from "@/server/container";
+import type { ImportReport } from "@/core/library/import-service";
+import { agentRepository, bundleCodec, importService, toolInspector } from "@/server/container";
+import { uploadedFolderSchema, withUploadedFolder } from "@/server/uploaded-folder";
 import { missingEnvKeys, toToolSource } from "@/server/tool-source";
 
 export type ActionResult = { ok: true; updatedAt: string } | { ok: false; message: string; issues?: SpecIssue[] };
@@ -51,6 +53,20 @@ export async function importAgentAction(yamlText: string): Promise<{ ok: false; 
   }
   revalidatePath("/agents");
   redirect(`/agents/${id}`);
+}
+
+/** Imports a folder picked in the browser: agents, lele AGENTS.md, Goose recipes, tools, skills, capabilities. */
+export async function importFolderAction(folderName: string, files: unknown): Promise<ImportReport | { ok: false; message: string }> {
+  const parsed = uploadedFolderSchema.safeParse(files);
+  if (!parsed.success) return { ok: false, message: parsed.error.issues.map((i) => i.message).join(" · ") };
+  try {
+    const [importer, codec] = [await importService(), bundleCodec()];
+    const report = await withUploadedFolder(folderName, parsed.data, async (dir) => importer.import(await codec.read(dir)));
+    revalidatePath("/agents");
+    return report;
+  } catch (error) {
+    return { ok: false, message: messageOf(error) };
+  }
 }
 
 export async function saveAgentAction(rawId: string, input: unknown): Promise<ActionResult> {

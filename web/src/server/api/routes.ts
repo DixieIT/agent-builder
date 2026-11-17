@@ -16,6 +16,8 @@ import {
   agentRepository,
   agentExporter,
   agentRunner,
+  bundleCodec,
+  importService,
   runService,
   agentService,
   environmentStore,
@@ -25,6 +27,7 @@ import {
   toolInspector,
 } from "@/server/container";
 import { toToolSource } from "@/server/tool-source";
+import { uploadedFolderSchema, withUploadedFolder } from "@/server/uploaded-folder";
 import {
   agentRecordDto,
   agentSpecDto,
@@ -599,5 +602,47 @@ export const getLeleCatalog = defineRoute({
       skills: await catalog.skills(),
       limitations: catalog.limitations(),
     });
+  },
+});
+
+// ---------------------------------------------------------------- import
+
+const importLineDto = z
+  .object({
+    kind: z.string(),
+    name: z.string(),
+    ok: z.boolean(),
+    replaced: z.boolean().optional(),
+    message: z.string().optional(),
+    warnings: z.array(z.string()).optional(),
+  })
+  .meta({ id: "ImportLine" });
+
+const importReportDto = z
+  .object({ lines: z.array(importLineDto), imported: z.number().int(), failed: z.number().int(), dryRun: z.boolean() })
+  .meta({ id: "ImportReport" });
+
+const importFolderDto = z
+  .object({
+    name: z.string().min(1).meta({ description: "Name of the uploaded folder; it names a single lele agent folder." }),
+    files: uploadedFolderSchema.meta({ description: "Text files with paths relative to the folder." }),
+    dryRun: z.boolean().default(false),
+  })
+  .meta({ id: "ImportFolderRequest" });
+
+export const importFolder = defineRoute({
+  method: "post",
+  path: "/import",
+  operationId: "importFolder",
+  summary: "Import a folder",
+  description:
+    "Imports a folder of items: agent specs, lele AGENTS.md (folders or .md files), Goose recipes, tools, skills, capabilities, or a whole `agents dump` bundle. Bad files are reported per line.",
+  tags: ["Import"],
+  body: importFolderDto,
+  responses: { 200: { description: "One line per item.", schema: importReportDto } },
+  handler: async ({ body }) => {
+    const [importer, codec] = [await importService(), bundleCodec()];
+    const report = await withUploadedFolder(body.name, body.files, async (dir) => importer.import(await codec.read(dir), { dryRun: body.dryRun }));
+    return json(report);
   },
 });

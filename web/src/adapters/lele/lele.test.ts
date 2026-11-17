@@ -83,8 +83,8 @@ describe("lele agent file", () => {
       "edit-file": "disabled",
       todo: "disabled",
       "lele-docs": "active",
+      "web-search": "available",
     });
-    expect("web-search" in spec.tools).toBe(false);
   });
 
   test("a list or a legacy skills key grants every name as active", () => {

@@ -7,6 +7,7 @@ import type { LibraryRepository } from "../src/core/library/library-repository.p
 import type { AgentExporter } from "../src/core/runtime/agent-exporter.port";
 import type { AgentRunner } from "../src/core/runtime/agent-runner.port";
 import type { RunService } from "../src/core/runtime/run-service";
+import type { ImportService } from "../src/core/library/import-service";
 import * as container from "../src/server/container";
 
 /**
@@ -32,6 +33,7 @@ export interface CliComposition {
   runs(): Promise<RunService>;
   runner(runtime: Runtime): Promise<AgentRunner>;
   exporter(runtime: Runtime): Promise<AgentExporter>;
+  importer(): Promise<ImportService>;
   close(): Promise<void>;
 }
 
@@ -51,6 +53,7 @@ export async function compose(overrides: CliOverrides = {}): Promise<CliComposit
     runs: container.runService,
     runner: container.agentRunner,
     exporter: container.exporterFor,
+    importer: container.importService,
     close: container.closeContainer,
   };
 }

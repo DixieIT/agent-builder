@@ -19,8 +19,6 @@ import { createInterface } from "node:readline";
 import path from "node:path";
 import { compose, type CliComposition, type CliOverrides } from "./compose";
 import type { AgentSummary, StoreCheck } from "../src/core/agents/agent-repository.port";
-import { parseAgentId, slugifyAgentId } from "../src/core/agents/agent-id";
-import { validateAgentSpec } from "../src/core/agents/agent-spec";
 import { ENVIRONMENTS, type Environment } from "../src/core/environment/environment";
 import type { BundleContent } from "../src/core/library/bundle.port";
 import type { LibraryItem, LibraryKind } from "../src/core/library/library";
@@ -346,10 +344,6 @@ interface LibraryRow {
   updatedAt: Date;
 }
 
-function reason(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 async function allLibraryItems(library: LibraryRepository): Promise<LibraryItem[]> {
   const [tools, skills, capabilities] = await Promise.all([library.tools.list(), library.skills.list(), library.capabilities.list()]);
   return [
@@ -376,81 +370,18 @@ async function dump(cli: CliComposition, options: Options): Promise<number> {
   return 0;
 }
 
-async function saveLibraryItem(library: LibraryRepository, entry: LibraryItem): Promise<void> {
-  switch (entry.kind) {
-    case "tool":
-      await library.tools.save(entry.item);
-      return;
-    case "skill":
-      await library.skills.save(entry.item);
-      return;
-    case "capability":
-      await library.capabilities.save(entry.item);
-      return;
-  }
-}
-
 /** One line per item. Items are validated by the codec when the bundle is read; saving reports store errors. */
 async function importBundle(cli: CliComposition, options: Options): Promise<number> {
   if (!options.arg) throw new Error(`"import" needs a path, e.g. bun run agents import tools/search_docs.`);
   const content = await cli.bundle.read(options.arg);
-  const library = options.dryRun ? undefined : await cli.library();
-  let failures = 0;
-
-  for (const problem of content.problems ?? []) {
-    failures++;
-    console.log(`✖ ${problem}`);
+  const report = await (await cli.importer()).import(content, { dryRun: options.dryRun });
+  for (const line of report.lines) {
+    const label = `${line.kind} ${line.name}`;
+    console.log(line.ok ? `✔ ${label}${line.replaced ? " (replaced)" : ""}` : `✖ ${label}: ${line.message}`);
+    for (const warning of line.warnings ?? []) console.log(`  ! ${warning}`);
   }
-
-  // Native harness files (lele AGENTS.md, Goose recipes) are converted by their runtime's exporter.
-  for (const native of content.native ?? []) {
-    try {
-      const { spec, warnings } = (await cli.exporter(native.runtime)).parse(native.document);
-      const named = native.runtime === "lele" && spec && typeof spec === "object" ? { ...spec, name: native.name } : spec;
-      const { spec: valid, issues } = validateAgentSpec(named);
-      if (!valid) throw new Error(issues.map((i) => `${i.path}: ${i.message}`).join("; "));
-      for (const warning of warnings) console.log(`  ! ${native.path}: ${warning}`);
-      content.agents.push({ id: native.runtime === "lele" ? native.name : slugifyAgentId(valid.name), spec: valid });
-    } catch (error) {
-      failures++;
-      console.log(`✖ ${native.runtime} agent ${native.path}: ${reason(error)}`);
-    }
-  }
-
-  for (const entry of content.items) {
-    const label = `${entry.kind} ${entry.item.name}`;
-    if (!library) {
-      console.log(`✔ ${label}`);
-      continue;
-    }
-    try {
-      await saveLibraryItem(library, entry);
-      console.log(`✔ ${label}`);
-    } catch (error) {
-      failures++;
-      console.log(`✖ ${label}: ${reason(error)}`);
-    }
-  }
-
-  for (const { id, spec } of content.agents) {
-    const label = `agent ${id}`;
-    if (!options.dryRun) {
-      try {
-        const exists = await cli.repository.exists(parseAgentId(id));
-        const result = exists ? await cli.service.save(id, spec) : await cli.service.import(spec, id);
-        console.log(`✔ ${label}${exists ? " (replaced)" : ""}`);
-        for (const issue of result.issues) console.log(`  ! ${issue.path}: ${issue.message}`);
-      } catch (error) {
-        failures++;
-        console.log(`✖ ${label}: ${reason(error)}`);
-      }
-      continue;
-    }
-    console.log(`✔ ${label}`);
-  }
-
-  if (options.dryRun) console.log("Dry run: nothing was saved.");
-  return failures === 0 ? 0 : 1;
+  if (report.dryRun) console.log("Dry run: nothing was saved.");
+  return report.failed === 0 ? 0 : 1;
 }
 
 async function libraryRowsOf(library: LibraryRepository, kind: LibraryKind): Promise<LibraryRow[]> {

@@ -15,6 +15,7 @@ import type { AgentPackager } from "@/core/runtime/agent-packager.port";
 import type { AgentRunner } from "@/core/runtime/agent-runner.port";
 import type { RuntimeCatalog } from "@/core/runtime/runtime-catalog.port";
 import { RunService } from "@/core/runtime/run-service";
+import { ImportService } from "@/core/library/import-service";
 import type { BundleCodec } from "@/core/library/bundle.port";
 import { FsBundleCodec } from "@/adapters/bundle/fs-bundle-codec";
 import type { ToolInspector } from "@/core/tools/tool-inspector.port";
@@ -205,6 +206,10 @@ export function agentRunner(runtime: Runtime = "goose"): Promise<AgentRunner> {
 export function agentPackager(): Promise<AgentPackager> {
   cache.packager ??= import("@/adapters/docker/docker-packager").then(({ DockerPackager }) => new DockerPackager(process.env.DOCKER_BIN ?? "docker"));
   return cache.packager;
+}
+
+export async function importService(): Promise<ImportService> {
+  return new ImportService(await agentService(), await agentRepository(), libraryRepository, exporterFor);
 }
 
 export function runService(): Promise<RunService> {

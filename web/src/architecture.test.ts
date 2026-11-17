@@ -7,6 +7,11 @@ import path from "node:path";
 const WEB = path.resolve(import.meta.dir, "..");
 const SRC = path.join(WEB, "src");
 
+/** Source files the layering rules apply to. Tests are composition code and may wire real adapters together. */
+function sources(dir: string): string[] {
+  return files(dir).filter((file) => !/\.test\.tsx?$/.test(file));
+}
+
 function files(dir: string): string[] {
   if (!existsSync(dir)) return [];
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
@@ -40,7 +45,7 @@ describe("ports and adapters", () => {
   test("core imports no outer layer, framework or driver", () => {
     const forbiddenLayers = new Set(["adapters", "server", "app", "components", "hooks"]);
     const forbiddenPackages = /^(next|react|react-dom|mongodb|@modelcontextprotocol\/|node:child_process|node:fs|fs|child_process|server-only)(\/|$)/;
-    const violations = files(path.join(SRC, "core")).flatMap((file) =>
+    const violations = sources(path.join(SRC, "core")).flatMap((file) =>
       imports(file)
         .filter((spec) => forbiddenLayers.has(layerOf(spec, file) ?? "") || forbiddenPackages.test(spec))
         .map((spec) => `${rel(file)} -> ${spec}`),
@@ -49,7 +54,7 @@ describe("ports and adapters", () => {
   });
 
   test("adapters import only core (never app, server, components or another adapter)", () => {
-    const violations = files(path.join(SRC, "adapters")).flatMap((file) => {
+    const violations = sources(path.join(SRC, "adapters")).flatMap((file) => {
       const ownAdapter = path.relative(path.join(SRC, "adapters"), file).split(path.sep)[0];
       return imports(file)
         .filter((spec) => {
@@ -69,7 +74,7 @@ describe("ports and adapters", () => {
 
   test("only the container (and the CLI composition) imports adapters", () => {
     const allowed = new Set(["src/server/container.ts"]);
-    const outside = [...files(path.join(SRC, "app")), ...files(path.join(SRC, "components")), ...files(path.join(SRC, "server")), ...files(path.join(SRC, "hooks"))];
+    const outside = [...sources(path.join(SRC, "app")), ...sources(path.join(SRC, "components")), ...sources(path.join(SRC, "server")), ...sources(path.join(SRC, "hooks"))];
     const violations = outside
       .filter((file) => !allowed.has(rel(file)))
       .flatMap((file) =>
