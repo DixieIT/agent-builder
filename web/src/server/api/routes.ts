@@ -22,7 +22,7 @@ import {
   agentService,
   environmentStore,
   libraryRepository,
-  runtimeCatalog,
+  capabilityCatalog,
   storeKind,
   toolInspector,
 } from "@/server/container";
@@ -44,7 +44,7 @@ import {
   resolveEnvironmentRequestDto,
   resolveEnvironmentResultDto,
   runRequestDto,
-  runtimeCatalogDto,
+  runtimeCapabilitiesDto,
   runtimeStatusDto,
   saveResultDto,
   storeStatusDto,
@@ -583,22 +583,23 @@ export const deleteLibraryItem = defineRoute({
   },
 });
 
-// ---------------------------------------------------------------- runtime catalog
+// ---------------------------------------------------------------- runtime capabilities
 
-export const getLeleCatalog = defineRoute({
+export const getLeleCapabilities = defineRoute({
   method: "get",
-  path: "/runtimes/lele/catalog",
-  operationId: "getLeleCatalog",
-  summary: "Lele catalog",
-  description: "What the lele harness offers to agents: tool groups, skills, and the limitations the UI should state.",
+  path: "/runtimes/lele/capabilities",
+  operationId: "getLeleCapabilities",
+  summary: "Lele capabilities",
+  description: "What the lele harness offers to agents: its capabilities (grantable plugins with their tools and argument schemas), skills, and the limitations the UI should state.",
   tags: ["Runtime"],
   responses: {
-    200: { description: "The catalog.", schema: runtimeCatalogDto },
+    200: { description: "The capabilities, skills and limitations.", schema: runtimeCapabilitiesDto },
+    503: { description: "The lele harness could not be booted or read." },
   },
   handler: async () => {
-    const catalog = await runtimeCatalog();
+    const catalog = await capabilityCatalog();
     return json({
-      toolGroups: await catalog.toolGroups(),
+      capabilities: await catalog.capabilities(),
       skills: await catalog.skills(),
       limitations: catalog.limitations(),
     });

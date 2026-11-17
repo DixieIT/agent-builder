@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState, useTransition } from "react";
 import { useImmer } from "use-immer";
-import { AlertCircle, Lock, Save, Trash2 } from "lucide-react";
+import { AlertCircle, ChevronRight, Lock, Plus, Save, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 import { deleteAgentAction, saveAgentAction } from "@/app/agents/actions";
 import { Badge } from "@/components/ui/badge";
@@ -16,12 +16,25 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { validateAgentSpec, type LeleAgentSpec, type LeleGrant } from "@/core/agents/agent-spec";
-import type { RuntimeSkill, RuntimeToolGroup } from "@/core/runtime/runtime-catalog.port";
+import { validateAgentSpec, type LeleAgentSpec } from "@/core/agents/agent-spec";
+import type { Capability, CapabilityTool } from "@/core/capabilities/capability";
+import type { RuntimeSkill } from "@/core/capabilities/capability-catalog.port";
+import {
+  capabilityAccess,
+  grantCapability,
+  LELE_AGENT_FLOOR,
+  revokeCapability,
+  setToolAccess,
+  toolAccess,
+  type Grants,
+  type ToolAccess,
+} from "@/core/capabilities/lele-access";
 import { cn } from "@/lib/utils";
 import { Field, Hint, IconButton, TextField } from "./fields";
 
@@ -29,15 +42,16 @@ type Props = {
   id: string;
   initialSpec: LeleAgentSpec;
   updatedAt: string;
-  toolGroups: RuntimeToolGroup[];
+  capabilities: Capability[];
+  floor: string[];
   skills: RuntimeSkill[];
   limitations: string[];
   definition: string;
+  catalogError?: string;
 };
 
-type GrantChoice = "default" | LeleGrant;
-
-export function LeleAgentEditor({ id, initialSpec, updatedAt, toolGroups, skills, limitations, definition }: Props) {
+export function LeleAgentEditor({ id, initialSpec, updatedAt, capabilities, floor: liveFloor, skills, limitations, definition, catalogError }: Props) {
+  const floor = liveFloor.length ? liveFloor : LELE_AGENT_FLOOR;
   const [spec, update] = useImmer<LeleAgentSpec>(initialSpec);
   const [saved, setSaved] = useState(() => JSON.stringify(initialSpec));
   const [savedAt, setSavedAt] = useState(updatedAt);
@@ -49,6 +63,14 @@ export function LeleAgentEditor({ id, initialSpec, updatedAt, toolGroups, skills
   const { issues } = useMemo(() => validateAgentSpec(spec), [spec]);
   const errors = issues.filter((i) => i.severity === "error");
   const fieldError = (path: string) => errors.find((i) => i.path === path)?.message;
+  const grants = spec.capabilities as Grants;
+  const setGrants = (next: Grants) => update((d) => void (d.capabilities = next));
+
+  const included = capabilities.filter((c) => capabilityAccess(c, grants, floor) !== "none");
+  const available = capabilities.filter((c) => capabilityAccess(c, grants, floor) === "none");
+  const known = new Set([...capabilities.flatMap((c) => [c.id, ...c.tools.flatMap((t) => [t.name, t.group])]), ...skills.map((s) => s.name), ...floor]);
+  const unknownGrants = Object.keys(grants).filter((name) => !known.has(name));
+  const loadedSkills = skills.filter((s) => grants[s.name] === "active").length;
 
   const save = useCallback(() => {
     startSaving(async () => {
@@ -71,15 +93,6 @@ export function LeleAgentEditor({ id, initialSpec, updatedAt, toolGroups, skills
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [dirty, save]);
-
-  const setGrant = (name: string, choice: GrantChoice) =>
-    update((d) => {
-      if (choice === "default") delete d.tools[name];
-      else d.tools[name] = choice;
-    });
-
-  const activeCount = Object.values(spec.tools).filter((g) => g === "active").length;
-  const grantedSkills = skills.filter((s) => spec.tools[s.name] === "active").length;
 
   return (
     <div className="overflow-hidden rounded-3xl border bg-card">
@@ -134,11 +147,11 @@ export function LeleAgentEditor({ id, initialSpec, updatedAt, toolGroups, skills
         <div className="border-b px-5 py-2">
           <TabsList className="flex-wrap">
             <TabsTrigger value="overview">Overview</TabsTrigger>
-            <TabsTrigger value="tools">
-              Tools <Badge variant="secondary" className="ml-1 rounded-full px-1.5 text-[10px]">{activeCount}</Badge>
+            <TabsTrigger value="capabilities">
+              Capabilities <Badge variant="secondary" className="ml-1 rounded-full px-1.5 text-[10px]">{included.length}</Badge>
             </TabsTrigger>
             <TabsTrigger value="skills">
-              Skills <Badge variant="secondary" className="ml-1 rounded-full px-1.5 text-[10px]">{grantedSkills}</Badge>
+              Skills <Badge variant="secondary" className="ml-1 rounded-full px-1.5 text-[10px]">{loadedSkills}</Badge>
             </TabsTrigger>
             <TabsTrigger value="file">AGENTS.md</TabsTrigger>
           </TabsList>
@@ -169,31 +182,65 @@ export function LeleAgentEditor({ id, initialSpec, updatedAt, toolGroups, skills
             </div>
           </TabsContent>
 
-          <TabsContent value="tools" className="flex flex-col gap-2">
-            <SectionNote notes={limitations.filter((l) => /tool|deferred/i.test(l))} />
-            <ul className="divide-y rounded-2xl border bg-background/50">
-              {toolGroups.map((group) => (
-                <GrantRow
-                  key={group.name}
-                  name={group.name}
-                  description={group.description}
-                  meta={group.tools.map((t) => t.name).join(", ")}
-                  source={group.source}
-                  defaultState={group.defaultState}
-                  value={spec.tools[group.name]}
-                  onChange={(choice) => setGrant(group.name, choice)}
-                />
-              ))}
-              {Object.keys(spec.tools)
-                .filter((name) => !toolGroups.some((g) => g.name === name) && !skills.some((s) => s.name === name))
-                .map((name) => (
-                  <GrantRow key={name} name={name} description="Not found in this lele installation." source="unknown" defaultState="disabled" value={spec.tools[name]} onChange={(choice) => setGrant(name, choice)} />
-                ))}
-            </ul>
+          <TabsContent value="capabilities" className="flex flex-col gap-3">
+            {catalogError ? (
+              <p className="rounded-2xl border border-destructive/40 bg-destructive/5 px-4 py-3 text-sm text-destructive">
+                Couldn’t read lele’s capabilities: {catalogError}
+              </p>
+            ) : null}
+            {included.map((capability) => (
+              <CapabilityCard
+                key={capability.id}
+                capability={capability}
+                grants={grants}
+                floor={floor}
+                onRevoke={() => setGrants(revokeCapability(grants, capability, floor))}
+                onToolChange={(tool, on) => setGrants(setToolAccess(grants, capability, tool, on, floor))}
+              />
+            ))}
+            {unknownGrants.map((name) => (
+              <div key={name} className="flex items-center gap-2 rounded-2xl border border-dashed px-4 py-2.5 text-sm">
+                <span className="font-mono">{name}</span>
+                <span className="text-muted-foreground">{grants[name]}</span>
+                <Hint>Not provided by this lele installation; lele ignores it. Kept as written.</Hint>
+                <IconButton
+                  label={`Remove ${name}`}
+                  className="ml-auto"
+                  onClick={() =>
+                    update((d) => {
+                      delete d.capabilities[name];
+                    })
+                  }
+                >
+                  <X />
+                </IconButton>
+              </div>
+            ))}
+            <div className="flex items-center gap-3">
+              <DropdownMenu>
+                <DropdownMenuTrigger render={<button type="button" disabled={!available.length} className="inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm font-medium hover:bg-accent disabled:opacity-50" />}>
+                  <Plus className="size-4" /> Add capability
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" className="w-96">
+                  {available.map((capability) => (
+                    <DropdownMenuItem key={capability.id} className="flex flex-col items-start gap-0.5" onClick={() => setGrants(grantCapability(grants, capability))}>
+                      <span className="font-mono text-sm">{capability.id}</span>
+                      <span className="line-clamp-2 text-xs text-muted-foreground">
+                        {capability.description || capability.tools.map((t) => t.name).join(", ")}
+                      </span>
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuContent>
+              </DropdownMenu>
+              {limitations.length ? (
+                <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  How lele grants <Hint>{limitations.join(" ")}</Hint>
+                </span>
+              ) : null}
+            </div>
           </TabsContent>
 
           <TabsContent value="skills" className="flex flex-col gap-2">
-            <SectionNote notes={limitations.filter((l) => /skill/i.test(l))} />
             <ul className="divide-y rounded-2xl border bg-background/50">
               {skills.map((skill) => (
                 <li key={`${skill.source}-${skill.name}`} className="flex items-center gap-3 px-4 py-2.5">
@@ -201,7 +248,7 @@ export function LeleAgentEditor({ id, initialSpec, updatedAt, toolGroups, skills
                     <div className="flex items-center gap-2">
                       <span className="font-mono text-sm">{skill.name}</span>
                       <Hint>
-                        {skill.description} ({skill.source}: {skill.path})
+                        {skill.source}: {skill.path}
                       </Hint>
                     </div>
                     <p className="truncate text-xs text-muted-foreground">{skill.description}</p>
@@ -211,8 +258,13 @@ export function LeleAgentEditor({ id, initialSpec, updatedAt, toolGroups, skills
                       <TooltipTrigger render={<span className="inline-flex" />}>
                         <Switch
                           aria-label={`Always load ${skill.name}`}
-                          checked={spec.tools[skill.name] === "active"}
-                          onCheckedChange={(on) => setGrant(skill.name, on ? "active" : "default")}
+                          checked={grants[skill.name] === "active"}
+                          onCheckedChange={(on) =>
+                            update((d) => {
+                              if (on) d.capabilities[skill.name] = "active";
+                              else delete d.capabilities[skill.name];
+                            })
+                          }
                         />
                       </TooltipTrigger>
                       <TooltipContent>Always load (otherwise loaded on demand)</TooltipContent>
@@ -222,7 +274,7 @@ export function LeleAgentEditor({ id, initialSpec, updatedAt, toolGroups, skills
                       <TooltipTrigger render={<span className="inline-flex text-muted-foreground" aria-label="On demand only" />}>
                         <Lock className="size-4" />
                       </TooltipTrigger>
-                      <TooltipContent>lele loads this skill on demand; only package skills can be always-loaded.</TooltipContent>
+                      <TooltipContent>Loaded on demand; only lele’s own package skills can be always-loaded.</TooltipContent>
                     </Tooltip>
                   )}
                 </li>
@@ -239,6 +291,112 @@ export function LeleAgentEditor({ id, initialSpec, updatedAt, toolGroups, skills
   );
 }
 
+const ACCESS_LABEL: Record<ToolAccess, string> = { granted: "in the agent's tool list", "on-demand": "on demand: joins after load_skill", denied: "not granted" };
+
+function CapabilityCard({
+  capability,
+  grants,
+  floor,
+  onRevoke,
+  onToolChange,
+}: {
+  capability: Capability;
+  grants: Grants;
+  floor: readonly string[];
+  onRevoke: () => void;
+  onToolChange: (tool: CapabilityTool, on: boolean) => void;
+}) {
+  const reachable = capability.tools.filter((t) => toolAccess(capability, t, grants, floor) !== "denied").length;
+  return (
+    <section aria-label={capability.id} className="rounded-2xl border bg-background/50">
+      <header className="flex items-center gap-2 border-b px-4 py-2.5">
+        <span className="font-mono text-sm font-semibold">{capability.id}</span>
+        {capability.description ? <Hint>{capability.description}</Hint> : null}
+        <span className="text-xs text-muted-foreground" title="Tools the agent can use">
+          {reachable}/{capability.tools.length}
+        </span>
+        <IconButton label="Remove capability" className="ml-auto" onClick={onRevoke}>
+          <X />
+        </IconButton>
+      </header>
+      <ul className="divide-y">
+        {capability.tools.map((tool) => (
+          <ToolRow key={tool.name} tool={tool} access={toolAccess(capability, tool, grants, floor)} onChange={(on) => onToolChange(tool, on)} />
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function ToolRow({ tool, access, onChange }: { tool: CapabilityTool; access: ToolAccess; onChange: (on: boolean) => void }) {
+  const props = Object.entries(tool.inputSchema?.properties ?? {});
+  const required = new Set(tool.inputSchema?.required ?? []);
+  return (
+    <li>
+      <Collapsible>
+        <div className="flex items-center gap-2 px-4 py-2">
+          <CollapsibleTrigger render={<button type="button" className="group flex min-w-0 flex-1 items-center gap-2 text-left" />}>
+            <ChevronRight className="size-3.5 shrink-0 text-muted-foreground transition-transform group-data-[panel-open]:rotate-90" />
+            <span className={cn("font-mono text-sm", access === "denied" && "text-muted-foreground")}>{tool.name}</span>
+            {tool.deferred ? (
+              <Badge variant="outline" className="rounded-full text-[10px]">
+                on demand
+              </Badge>
+            ) : null}
+            <span className="min-w-0 truncate text-xs text-muted-foreground">{tool.description?.split("\n")[0]}</span>
+          </CollapsibleTrigger>
+          <Tooltip>
+            <TooltipTrigger render={<span className="inline-flex" />}>
+              <Switch aria-label={`${tool.name}: ${ACCESS_LABEL[access]}`} checked={access !== "denied"} onCheckedChange={onChange} />
+            </TooltipTrigger>
+            <TooltipContent>
+              {ACCESS_LABEL[access]} · grant group {tool.group}
+            </TooltipContent>
+          </Tooltip>
+        </div>
+        <CollapsibleContent className="px-4 pb-3 pl-10">
+          {tool.description ? <p className="whitespace-pre-wrap text-sm text-muted-foreground">{tool.description}</p> : null}
+          {props.length ? (
+            <div className="mt-2 overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="text-muted-foreground">
+                  <tr>
+                    <th className="py-1 pr-3 font-medium">Argument</th>
+                    <th className="py-1 pr-3 font-medium">Type</th>
+                    <th className="py-1 font-medium">Description</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {props.map(([name, schema]) => (
+                    <tr key={name} className="border-t align-top">
+                      <td className="py-1 pr-3 font-mono">
+                        {name}
+                        {required.has(name) ? <span className="text-destructive">*</span> : null}
+                      </td>
+                      <td className="py-1 pr-3 font-mono text-muted-foreground">{typeOf(schema)}</td>
+                      <td className="py-1 text-muted-foreground">{(schema as { description?: string })?.description ?? ""}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="mt-1 text-xs text-muted-foreground">No arguments.</p>
+          )}
+        </CollapsibleContent>
+      </Collapsible>
+    </li>
+  );
+}
+
+function typeOf(schema: unknown): string {
+  const s = schema as { type?: string | string[]; enum?: unknown[]; items?: { type?: string } } | undefined;
+  if (!s) return "";
+  if (s.enum) return s.enum.map(String).join(" | ");
+  if (s.type === "array") return `${s.items?.type ?? "any"}[]`;
+  return Array.isArray(s.type) ? s.type.join(" | ") : (s.type ?? "");
+}
+
 function ToggleRow({ id, label, hint, checked, onChange }: { id: string; label: string; hint: string; checked: boolean; onChange: (v: boolean) => void }) {
   return (
     <div className="flex items-center justify-between gap-3 rounded-xl border bg-background/50 px-3 py-2.5">
@@ -248,56 +406,5 @@ function ToggleRow({ id, label, hint, checked, onChange }: { id: string; label: 
       </span>
       <Switch id={id} checked={checked} onCheckedChange={onChange} />
     </div>
-  );
-}
-
-/** How the main lele agent gets the group; shown for context. Sub-agents only get floor groups and their grants. */
-const MAIN_AGENT: Record<RuntimeToolGroup["defaultState"], string> = {
-  floor: "always granted, also to sub-agents (switch off to remove it)",
-  active: "the main agent has it; a sub-agent only when switched on here",
-  available: "loaded on demand (load_skill or a matching file); switch on to give it from the start",
-  disabled: "off in this lele installation",
-};
-
-/**
- * One switch per group, matching what lele actually does for a sub-agent (`active ∪ floor − disabled`):
- * floor groups are on unless set to disabled; every other group is on only when granted `active`.
- */
-function GrantRow(props: {
-  name: string;
-  description?: string;
-  meta?: string;
-  source: string;
-  defaultState: RuntimeToolGroup["defaultState"];
-  value: LeleGrant | undefined;
-  onChange: (choice: GrantChoice) => void;
-}) {
-  const floor = props.defaultState === "floor";
-  const on = floor ? props.value !== "disabled" : props.value === "active";
-  const toggle = (next: boolean) => props.onChange(floor ? (next ? "default" : "disabled") : next ? "active" : "default");
-  return (
-    <li className="flex items-center gap-3 px-4 py-2.5">
-      <div className="flex min-w-0 flex-1 items-center gap-2">
-        <span className={cn("font-mono text-sm", !on && "text-muted-foreground")}>{props.name}</span>
-        {props.defaultState === "available" ? (
-          <Badge variant="outline" className="rounded-full text-[10px]">
-            on demand
-          </Badge>
-        ) : null}
-        <Hint>
-          {[props.description, props.meta && `Tools: ${props.meta}`, `${props.source}: ${MAIN_AGENT[props.defaultState]}`].filter(Boolean).join(" · ")}
-        </Hint>
-      </div>
-      <Switch aria-label={`${props.name} for this agent`} checked={on} onCheckedChange={toggle} />
-    </li>
-  );
-}
-
-function SectionNote({ notes }: { notes: string[] }) {
-  if (!notes.length) return null;
-  return (
-    <p className="flex items-center gap-1.5 self-end text-xs text-muted-foreground">
-      lele limits <Hint>{notes.join(" ")}</Hint>
-    </p>
   );
 }

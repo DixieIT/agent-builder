@@ -128,7 +128,9 @@ export type LeleGrant = (typeof LELE_GRANTS)[number];
 
 /**
  * lele sub-agent (`.lele/agents/<name>/AGENTS.md`): exactly the frontmatter keys lele reads, plus the body.
- * `tools` maps a tool, group, plugin, extension or skill name to active/disabled; bash, read-file and todo are always granted unless disabled.
+ * `capabilities` is the frontmatter `tools:` map of grants. A grant names a capability (a lele plugin or extension,
+ * e.g. core.pdf), a tool group inside one (e.g. pdf, bash), a single tool, or a skill; lele resolves them as
+ * core/capabilities/lele-access.ts describes. bash, read-file and todo are granted to every agent unless disabled.
  */
 export const leleAgentSpecSchema = z.strictObject({
   runtime: z.literal("lele"),
@@ -136,7 +138,7 @@ export const leleAgentSpecSchema = z.strictObject({
   description: z.string().default(""),
   model: z.string().regex(/^[\w.-]+(:[\w./:@-]+)?$|^[\w.-]+\/[\w./:@-]+$/, 'Use "provider:model" or an OpenRouter slug like deepseek/deepseek-v4-flash').optional(),
   instructions: z.string().default(""),
-  tools: z.record(z.string().min(1), z.enum(LELE_GRANTS)).default({}),
+  capabilities: z.record(z.string().min(1), z.enum(LELE_GRANTS)).default({}),
   hidden: z.boolean().optional(),
   simple: z.boolean().optional(),
 });
@@ -144,9 +146,19 @@ export const leleAgentSpecSchema = z.strictObject({
 export const RUNTIMES = ["goose", "lele"] as const;
 export type Runtime = (typeof RUNTIMES)[number];
 
-/** A spec without `runtime` is a Goose agent (the original format). */
-export const agentSpecSchema = z.preprocess(
-  (value) => (value && typeof value === "object" && !("runtime" in value) ? { ...value, runtime: "goose" } : value),
+/** A spec without `runtime` is a Goose agent (the original format); a lele spec saved with `tools` is migrated. */
+export const agentSpecSchema = z.preprocess((value) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const doc = value as Record<string, unknown>;
+  if (!("runtime" in doc)) return { ...doc, runtime: "goose" };
+  // Older lele specs kept grants in `tools` (some next to a stray empty Goose-style `capabilities: []`).
+  const noGrants = !("capabilities" in doc) || (Array.isArray(doc.capabilities) && doc.capabilities.length === 0);
+  if (doc.runtime === "lele" && "tools" in doc && noGrants) {
+    const { tools, ...rest } = doc;
+    return { ...rest, capabilities: tools };
+  }
+  return doc;
+},
   z.discriminatedUnion("runtime", [gooseAgentSpecSchema, leleAgentSpecSchema]),
 );
 
@@ -157,31 +169,32 @@ export type CapabilityEntry = z.infer<typeof capabilityEntrySchema>;
 export type DepsSchema = z.infer<typeof depsSchemaSchema>;
 export type Retry = z.infer<typeof retrySchema>;
 
-export type Capability =
+/** One entry of a Goose spec's `capabilities` list, unwrapped: a configured Goose extension. */
+export type GooseCapability =
   | { kind: "MCPStdio"; args: McpStdioArgs }
   | { kind: "MCP"; args: McpArgs }
   | { kind: "GooseExtension"; args: GooseExtensionArgs };
 
-export function toCapability(entry: CapabilityEntry): Capability {
+export function toCapability(entry: CapabilityEntry): GooseCapability {
   const [kind, args] = Object.entries(entry)[0];
-  return { kind, args } as Capability;
+  return { kind, args } as GooseCapability;
 }
 
-export function fromCapability(capability: Capability): CapabilityEntry {
+export function fromCapability(capability: GooseCapability): CapabilityEntry {
   return { [capability.kind]: capability.args } as CapabilityEntry;
 }
 
-export function capabilities(spec: AgentSpec): Capability[] {
+export function capabilities(spec: AgentSpec): GooseCapability[] {
   return spec.runtime === "goose" ? spec.capabilities.map(toCapability) : [];
 }
 
-/** Number of things the agent can use: Goose extensions, or lele grants that are active. */
+/** Goose: number of configured extensions. lele: number of active grants (capabilities, groups, tools or skills). */
 export function capabilityCount(spec: AgentSpec): number {
-  return spec.runtime === "goose" ? spec.capabilities.length : Object.values(spec.tools).filter((g) => g === "active").length;
+  return spec.runtime === "goose" ? spec.capabilities.length : Object.values(spec.capabilities).filter((g) => g === "active").length;
 }
 
 /** What the "Add capability" menu offers. Each item is a Goose extension type. */
-export const CAPABILITY_CATALOG: { kind: CapabilityKind; label: string; summary: string; defaults: Capability["args"] }[] = [
+export const CAPABILITY_CATALOG: { kind: CapabilityKind; label: string; summary: string; defaults: GooseCapability["args"] }[] = [
   { kind: "MCPStdio", label: "MCP server (local)", summary: "Goose stdio extension: starts an MCP server as a subprocess.", defaults: { id: "server", command: "" } },
   { kind: "MCP", label: "MCP server (remote)", summary: "Goose streamable_http extension: connects to an MCP server URL.", defaults: { id: "remote", url: "https://" } },
   { kind: "GooseExtension", label: "Goose extension", summary: "An extension that ships with Goose, e.g. developer.", defaults: { type: "builtin", name: "developer" } },
@@ -190,7 +203,7 @@ export const CAPABILITY_CATALOG: { kind: CapabilityKind; label: string; summary:
 export function newAgentSpec(name: string, runtime: Runtime = "goose"): AgentSpec {
   if (runtime === "lele") {
     const slug = name.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "agent";
-    return leleAgentSpecSchema.parse({ runtime, name: slug, instructions: "", tools: {} });
+    return leleAgentSpecSchema.parse({ runtime, name: slug, instructions: "", capabilities: {} });
   }
   return gooseAgentSpecSchema.parse({ runtime, name, description: "", model: "anthropic:claude-opus-5-5", instructions: "", capabilities: [] });
 }

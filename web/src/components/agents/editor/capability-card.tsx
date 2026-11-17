@@ -4,15 +4,15 @@ import { ArrowDown, ArrowUp, Trash2 } from "lucide-react";
 import { ToolInspector } from "@/components/agents/tool-inspector";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { CAPABILITY_CATALOG, type Capability, type GooseExtensionArgs, type McpArgs, type McpStdioArgs } from "@/core/agents/agent-spec";
+import { CAPABILITY_CATALOG, type GooseCapability, type GooseExtensionArgs, type McpArgs, type McpStdioArgs } from "@/core/agents/agent-spec";
 import { EnvKeysPicker } from "./env-keys-picker";
 import { CodecTextarea, Field, Hint, IconButton, NumberField, TextField, keyValueCodec, linesCodec, listCodec } from "./fields";
 
 type Props = {
   index: number;
   count: number;
-  capability: Capability;
-  onChange: (capability: Capability) => void;
+  capability: GooseCapability;
+  onChange: (capability: GooseCapability) => void;
   onRemove: () => void;
   onMove: (delta: -1 | 1) => void;
 };

@@ -1,104 +1,67 @@
+import { spawn } from "node:child_process";
 import type { Dirent } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { parse } from "yaml";
 
-import type { RuntimeCatalog, RuntimeSkill, RuntimeTool, RuntimeToolGroup } from "@/core/runtime/runtime-catalog.port";
+import type { Capability, CapabilityTool } from "@/core/capabilities/capability";
+import type { CapabilityCatalog, RuntimeSkill } from "@/core/capabilities/capability-catalog.port";
+import { RuntimeUnavailableError } from "@/core/shared/errors";
+import type { JsonSchemaObject } from "@/core/tools/tool-inspector.port";
 
 import { splitFrontMatter } from "./lele-agent-file";
 
 /**
- * What lele offers to agents: native tool groups, extensions, plugins and skills.
- * Sources: the harness package (tools.yaml, bundled skills), `~/.lele` and `<projectDir>/.lele`, and
- * `lele serve` /health when a serve URL is given. Project entries win over home entries with the same name.
+ * What lele offers to agents, read from lele itself: `introspect.py` boots lele's kernel and prints every mounted
+ * plugin with its tools. Nothing about the tools is hardcoded here.
+ * Skills come from the filesystem: the harness package, `~/.lele` and `<projectDir>/.lele` (project wins).
  */
 
-type State = RuntimeToolGroup["defaultState"];
-
-interface BuiltinGroup {
-  name: string;
-  tools: string[];
-  floor?: boolean;
-}
-
-/** Native tool groups as lele's grant table defines them. bash, read-file and todo are always granted. */
-const BUILTIN_GROUPS: readonly BuiltinGroup[] = [
-  { name: "bash", tools: ["bash", "bash_output", "bash_kill"], floor: true },
-  { name: "read-file", tools: ["read_file"], floor: true },
-  { name: "todo", tools: ["todo_write"], floor: true },
-  { name: "write-file", tools: ["write_file"] },
-  { name: "edit-file", tools: ["apply_patch"] },
-  { name: "subagent", tools: ["subagent", "subagent_fork", "send_message", "interrupt_agent", "list_agents"] },
-  { name: "web-search", tools: ["web_search"] },
-  { name: "web-fetch", tools: ["web_fetch"] },
-  { name: "load-skill", tools: ["load_skill"] },
-  { name: "pdf", tools: ["pdf_info", "pdf_read", "pdf_compose", "pdf_modify"] },
-];
-
-const NATIVE_GROUPS: ReadonlySet<string> = new Set(BUILTIN_GROUPS.map((group) => group.name));
-const NATIVE_TOOLS: ReadonlySet<string> = new Set(BUILTIN_GROUPS.flatMap((group) => group.tools));
-
-const HEALTH_TIMEOUT_MS = 2_000;
+/** Stdout marker `introspect.py` prints before its JSON. */
+const MARK = "UAB-LELE-CAPABILITIES:";
+const INTROSPECT_TIMEOUT_MS = 120_000;
+const DEFAULT_CACHE_MS = 60_000;
+const STDERR_TAIL_LINES = 5;
 
 export interface LeleCatalogOptions {
   harnessDir: string;
   projectDir: string;
   homeDir: string;
-  serveUrl?: string;
+  scriptPath: string;
+  uvBin?: string;
+  cacheMs?: number;
 }
 
-interface Health {
-  tools: string[];
-  plugins: string[];
-  extensions: string[];
-  skills: string[];
+interface Introspection {
+  capabilities: Capability[];
+  floor: string[];
 }
 
-export class LeleCatalog implements RuntimeCatalog {
+export class LeleCatalog implements CapabilityCatalog {
   readonly runtime = "lele";
+
+  private cached?: { at: number; value: Promise<Introspection> };
 
   constructor(private readonly opts: LeleCatalogOptions) {}
 
-  async toolGroups(): Promise<RuntimeToolGroup[]> {
-    const [states, extensionDirs, pluginDirs, health] = await Promise.all([
-      this.toolStates(),
-      this.namedDirs("extensions", "extension.py"),
-      this.namedDirs("plugins", "plugin.py"),
-      this.health(),
-    ]);
-    const configExtensions = await this.configSection("extensions");
-    const configPlugins = await this.configSection("plugins");
+  async capabilities(): Promise<Capability[]> {
+    return (await this.introspection()).capabilities;
+  }
 
-    const groups: RuntimeToolGroup[] = BUILTIN_GROUPS.map((group): RuntimeToolGroup => ({
-      name: group.name,
-      source: "builtin",
-      defaultState: group.floor ? "floor" : (toState(states.get(group.name)) ?? "active"),
-      tools: group.tools.map((name): RuntimeTool => ({ name })),
-    }));
+  async grantFloor(): Promise<string[]> {
+    return (await this.introspection()).floor;
+  }
 
-    // Skill entries of tools.yaml that are not native groups (e.g. lele-docs) are on-demand skills.
-    for (const [name, value] of states) {
-      if (NATIVE_GROUPS.has(name)) continue;
-      groups.push({ name, source: "skill", defaultState: toState(value) ?? "disabled", tools: [] });
-    }
-
-    const extensionNames = sortedUnion(extensionDirs.keys(), health?.extensions ?? []);
-    for (const name of extensionNames) {
-      groups.push({ name, source: "extension", defaultState: toState(configExtensions.get(name)) ?? "active", tools: [] });
-    }
-
-    const pluginNames = sortedUnion(pluginDirs.keys(), health?.plugins ?? []);
-    for (const name of pluginNames) {
-      groups.push({ name, source: "plugin", defaultState: toState(configPlugins.get(name)) ?? "active", tools: [] });
-    }
-
-    // Native tools the running server exposes that no built-in group lists: each one is its own group.
-    const known = new Set(groups.flatMap((group) => group.tools.map((tool) => tool.name)));
-    for (const tool of [...new Set(health?.tools ?? [])].sort()) {
-      if (NATIVE_TOOLS.has(tool) || known.has(tool)) continue;
-      groups.push({ name: tool, source: "builtin", defaultState: "disabled", tools: [{ name: tool }] });
-    }
-    return groups;
+  private introspection(): Promise<Introspection> {
+    const cacheMs = this.opts.cacheMs ?? DEFAULT_CACHE_MS;
+    if (this.cached && Date.now() - this.cached.at < cacheMs) return this.cached.value;
+    const value = this.introspect();
+    this.cached = { at: Date.now(), value };
+    // A failed run is not cached: the next call tries again.
+    value.catch(() => {
+      if (this.cached?.value === value) this.cached = undefined;
+    });
+    return value;
   }
 
   async skills(): Promise<RuntimeSkill[]> {
@@ -119,90 +82,112 @@ export class LeleCatalog implements RuntimeCatalog {
       for (const skill of await scanSkills(dir, source)) byName.set(skill.name, skill);
     }
     return [...byName.values()]
-      .map((skill) => ({ ...skill, grantable: skill.source === "package" && !NATIVE_GROUPS.has(skill.name) }))
+      .map((skill) => ({ ...skill, grantable: skill.source === "package" }))
       .sort((a, b) => a.name.localeCompare(b.name));
   }
 
   limitations(): string[] {
     return [
-      "lele doesn't expose tool argument schemas; arguments are shown only for tools defined in the builder library.",
-      "Deferred loading in lele works through skills (load_skill), not per agent.",
-      "Per-agent skill allowlists don't exist in lele; any skill can be loaded on demand.",
+      "Deferred tools join an agent's list after `load_skill <group>`; the agent needs load-skill to load them itself.",
+      "A lele sub-agent always gets bash, read-file and todo unless they are disabled.",
     ];
   }
 
-  /** `skills:` of the harness's tools.yaml: the default state of each name. */
-  private async toolStates(): Promise<Map<string, string>> {
-    const text = await readOptional(path.join(this.opts.harnessDir, "lele_harness", "tools.yaml"));
-    const states = new Map<string, string>();
-    if (text === undefined) return states;
-    const skills = recordOf(parseYaml(text))?.skills;
-    for (const [name, value] of Object.entries(recordOf(skills) ?? {})) {
-      if (typeof value === "string") states.set(name, value);
-    }
-    return states;
-  }
+  private async introspect(): Promise<Introspection> {
+    const { harnessDir, projectDir, scriptPath, uvBin = "uv" } = this.opts;
+    const { stdout, stderr } = await runLele(uvBin, [
+      "run",
+      "--project",
+      harnessDir,
+      "python",
+      scriptPath,
+      projectDir,
+    ]);
 
-  /** `<section>:` of `~/.lele/config.yaml`, overridden by `<projectDir>/.lele/config.yaml`. */
-  private async configSection(section: "extensions" | "plugins"): Promise<Map<string, string>> {
-    const merged = new Map<string, string>();
-    const files = [
-      path.join(this.opts.homeDir, ".lele", "config.yaml"),
-      path.join(this.opts.projectDir, ".lele", "config.yaml"),
-    ];
-    for (const file of files) {
-      const text = await readOptional(file);
-      if (text === undefined) continue;
-      for (const [name, value] of Object.entries(recordOf(recordOf(parseYaml(text))?.[section]) ?? {})) {
-        if (typeof value === "string") merged.set(name, value);
-      }
+    const line = stdout.split(/\r?\n/).find((candidate) => candidate.includes(MARK));
+    if (line === undefined) {
+      throw new RuntimeUnavailableError(`lele printed no capability list${stderrTail(stderr)}`);
     }
-    return merged;
-  }
-
-  /** Subfolders of `<home>/.lele/<kind>` and `<project>/.lele/<kind>` that hold `marker`. Project wins. */
-  private async namedDirs(kind: "extensions" | "plugins", marker: string): Promise<Map<string, string>> {
-    const found = new Map<string, string>();
-    for (const root of [this.opts.homeDir, this.opts.projectDir]) {
-      const base = path.join(root, ".lele", kind);
-      let entries: Dirent[];
-      try {
-        entries = await readdir(base, { withFileTypes: true });
-      } catch (error) {
-        if (isErrno(error, "ENOENT") || isErrno(error, "ENOTDIR")) continue;
-        throw error;
-      }
-      for (const entry of entries) {
-        if (!entry.isDirectory()) continue;
-        if ((await readOptional(path.join(base, entry.name, marker))) !== undefined) {
-          found.set(entry.name, path.join(base, entry.name));
-        }
-      }
-    }
-    return found;
-  }
-
-  /** `lele serve` /health, or undefined when no server is configured or it does not answer. */
-  private async health(): Promise<Health | undefined> {
-    if (!this.opts.serveUrl) return undefined;
     try {
-      const response = await fetch(`${this.opts.serveUrl.replace(/\/+$/, "")}/health`, {
-        signal: AbortSignal.timeout(HEALTH_TIMEOUT_MS),
-      });
-      if (!response.ok) return undefined;
-      const body: unknown = await response.json();
-      const record = recordOf(body);
-      if (!record) return undefined;
+      const payload: unknown = JSON.parse(line.slice(line.indexOf(MARK) + MARK.length));
+      const floor = (payload as { floor?: unknown }).floor;
       return {
-        tools: stringList(record.tools),
-        plugins: stringList(record.plugins),
-        extensions: stringList(record.extensions),
-        skills: stringList(record.skills),
+        capabilities: toCapabilities(payload),
+        floor: Array.isArray(floor) ? floor.filter((name): name is string => typeof name === "string") : [],
       };
     } catch {
-      return undefined;
+      throw new RuntimeUnavailableError(`lele printed an unreadable capability list${stderrTail(stderr)}`);
     }
   }
+}
+
+/** Runs `uv run … introspect.py`. Resolves with stdout and stderr on exit 0, rejects with the reason otherwise. */
+function runLele(uvBin: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(uvBin, args, {
+      shell: false,
+      windowsHide: true,
+      timeout: INTROSPECT_TIMEOUT_MS,
+      env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONUTF8: "1" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.on("error", (error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") {
+        reject(new RuntimeUnavailableError("uv not found; install uv or set UV_BIN"));
+      } else {
+        reject(new RuntimeUnavailableError(`could not start uv: ${error.message}`));
+      }
+    });
+    child.on("close", (code, signal) => {
+      if (signal) {
+        reject(new RuntimeUnavailableError(`lele introspection was stopped (${signal}) after ${INTROSPECT_TIMEOUT_MS / 1000} s${stderrTail(stderr)}`));
+      } else if (code !== 0) {
+        reject(new RuntimeUnavailableError(`lele introspection exited with code ${code}${stderrTail(stderr)}`));
+      } else {
+        resolve({ stdout, stderr });
+      }
+    });
+  });
+}
+
+function toCapabilities(payload: unknown): Capability[] {
+  const plugins = recordOf(payload)?.plugins;
+  if (!Array.isArray(plugins)) throw new Error("no plugins list");
+  return plugins
+    .map((plugin): Capability => {
+      const record = recordOf(plugin);
+      if (!record || typeof record.name !== "string" || !Array.isArray(record.tools)) throw new Error("malformed plugin");
+      const id = record.name;
+      return {
+        id,
+        runtime: "lele",
+        description: typeof record.description === "string" ? record.description : "",
+        tools: record.tools.map((tool) => toTool(tool, id)),
+      };
+    })
+    .sort((a, b) => a.id.localeCompare(b.id));
+}
+
+function toTool(value: unknown, plugin: string): CapabilityTool {
+  const record = recordOf(value);
+  if (!record || typeof record.name !== "string") throw new Error("malformed tool");
+  return {
+    name: record.name,
+    description: typeof record.description === "string" && record.description ? record.description : undefined,
+    inputSchema: (recordOf(record.parameters) ?? {}) as JsonSchemaObject,
+    deferred: record.deferred === true,
+    group: typeof record.group === "string" && record.group ? record.group : plugin,
+  };
 }
 
 async function scanSkills(dir: string, source: RuntimeSkill["source"]): Promise<RuntimeSkill[]> {
@@ -244,6 +229,11 @@ function describeSkill(text: string): string {
   return "";
 }
 
+function stderrTail(stderr: string): string {
+  const lines = stderr.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  return lines.length ? `:\n${lines.slice(-STDERR_TAIL_LINES).join("\n")}` : "";
+}
+
 function parseYaml(text: string): unknown {
   try {
     return parse(text, { version: "1.1" });
@@ -259,18 +249,6 @@ async function readOptional(file: string): Promise<string | undefined> {
     if (isErrno(error, "ENOENT") || isErrno(error, "ENOTDIR") || isErrno(error, "EISDIR")) return undefined;
     throw error;
   }
-}
-
-function toState(value: string | undefined): State | undefined {
-  return value === "floor" || value === "active" || value === "available" || value === "disabled" ? value : undefined;
-}
-
-function sortedUnion(first: Iterable<string>, second: string[]): string[] {
-  return [...new Set([...first, ...second])].sort();
-}
-
-function stringList(value: unknown): string[] {
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
 function recordOf(value: unknown): Record<string, unknown> | undefined {

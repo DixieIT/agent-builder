@@ -50,7 +50,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import {
   CAPABILITY_CATALOG,
-  type Capability,
+  type GooseCapability,
   type DepsSchema,
   type Retry,
   fromCapability,
@@ -397,7 +397,7 @@ export function GooseAgentEditor({ id, initialSpec, updatedAt }: Props) {
                               fromCapability({
                                 kind: entry.kind,
                                 args: structuredClone(entry.defaults),
-                              } as Capability),
+                              } as GooseCapability),
                             ),
                         )
                       }

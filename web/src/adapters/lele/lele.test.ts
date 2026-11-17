@@ -5,7 +5,13 @@ import path from "node:path";
 
 import { parseAgentId } from "@/core/agents/agent-id";
 import type { LeleAgentSpec } from "@/core/agents/agent-spec";
-import { AgentConflictError, AgentNotFoundError, InvalidAgentDocumentError, ReadOnlyAgentError } from "@/core/shared/errors";
+import {
+  AgentConflictError,
+  AgentNotFoundError,
+  InvalidAgentDocumentError,
+  ReadOnlyAgentError,
+  RuntimeUnavailableError,
+} from "@/core/shared/errors";
 import { formatLeleAgentFile, parseLeleAgentFile } from "./lele-agent-file";
 import { LeleAgentRepository } from "./lele-agent-repository";
 import { LeleCatalog } from "./lele-catalog";
@@ -15,6 +21,7 @@ import { LeleExporter } from "./lele-exporter";
 const HARNESS = "d:/Progetti/lele-harness";
 const BUILTIN_AGENTS = path.join(HARNESS, "lele_harness", "agents");
 const EXPLORE_FILE = path.join(BUILTIN_AGENTS, "explore", "AGENTS.md");
+const INTROSPECT = path.resolve(import.meta.dir, "introspect.py");
 
 let root: string;
 
@@ -38,7 +45,7 @@ describe("lele agent file", () => {
 
     expect(spec.runtime).toBe("lele");
     expect(spec.name).toBe("explore");
-    expect(spec.tools).toEqual({});
+    expect(spec.capabilities).toEqual({});
     expect(spec.instructions.startsWith("You are a read-only scout")).toBe(true);
 
     const formatted = formatLeleAgentFile(spec);
@@ -76,7 +83,7 @@ describe("lele agent file", () => {
     expect(spec.hidden).toBe(true);
     expect(spec.simple).toBeUndefined();
     expect(spec.instructions).toBe("Do the thing.");
-    expect(spec.tools).toEqual({
+    expect(spec.capabilities).toEqual({
       bash: "active",
       "read-file": "active",
       "write-file": "disabled",
@@ -88,10 +95,10 @@ describe("lele agent file", () => {
   });
 
   test("a list or a legacy skills key grants every name as active", () => {
-    expect(parseLeleAgentFile("---\ntools: [bash, pdf]\n---\nx", "a").tools).toEqual({ bash: "active", pdf: "active" });
-    expect(parseLeleAgentFile("---\nskills: {pdf: true}\n---\nx", "a").tools).toEqual({ pdf: "active" });
+    expect(parseLeleAgentFile("---\ntools: [bash, pdf]\n---\nx", "a").capabilities).toEqual({ bash: "active", pdf: "active" });
+    expect(parseLeleAgentFile("---\nskills: {pdf: true}\n---\nx", "a").capabilities).toEqual({ pdf: "active" });
     // tools wins over the legacy key when both are present.
-    expect(parseLeleAgentFile("---\ntools: {bash: active}\nskills: {pdf: true}\n---\nx", "a").tools).toEqual({ bash: "active" });
+    expect(parseLeleAgentFile("---\ntools: {bash: active}\nskills: {pdf: true}\n---\nx", "a").capabilities).toEqual({ bash: "active" });
   });
 
   test("the name key overrides the folder name, as lele does", () => {
@@ -99,10 +106,10 @@ describe("lele agent file", () => {
   });
 
   test("formats like lele agent create: no name, no runtime, empty values dropped", () => {
-    const spec: LeleAgentSpec = { runtime: "lele", name: "demo", description: "Demo", instructions: "Do it.", tools: { bash: "active" }, hidden: false };
+    const spec: LeleAgentSpec = { runtime: "lele", name: "demo", description: "Demo", instructions: "Do it.", capabilities: { bash: "active" }, hidden: false };
     expect(formatLeleAgentFile(spec)).toBe("---\ndescription: Demo\ntools:\n  bash: active\n\n---\nDo it.\n");
 
-    const bare: LeleAgentSpec = { runtime: "lele", name: "bare", description: "", instructions: "Hi", tools: {} };
+    const bare: LeleAgentSpec = { runtime: "lele", name: "bare", description: "", instructions: "Hi", capabilities: {} };
     expect(formatLeleAgentFile(bare)).toBe("---\n{}\n\n---\nHi\n");
   });
 
@@ -124,7 +131,7 @@ describe("LeleAgentRepository", () => {
       name: "reviewer",
       description: "Reviews code",
       instructions: "Review carefully.",
-      tools: { "read-file": "active", bash: "active" },
+      capabilities: { "read-file": "active", bash: "active" },
     };
     const created = await repo.create(id, reviewer);
     expect(created.spec.name).toBe("reviewer");
@@ -186,9 +193,9 @@ describe("LeleAgentRepository", () => {
 });
 
 describe("LeleCatalog", () => {
-  test("lists the real skills of the harness; package skills that are not native groups are grantable", async () => {
+  test("lists the real skills of the harness; every package skill is grantable", async () => {
     const { projectDir } = await tempDirs();
-    const catalog = new LeleCatalog({ harnessDir: HARNESS, projectDir, homeDir: path.join(root, "no-home") });
+    const catalog = new LeleCatalog({ harnessDir: HARNESS, projectDir, homeDir: path.join(root, "no-home"), scriptPath: INTROSPECT });
     const skills = await catalog.skills();
     const byName = new Map(skills.map((skill) => [skill.name, skill]));
 
@@ -197,54 +204,65 @@ describe("LeleCatalog", () => {
     expect(docs?.grantable).toBe(true);
     expect(docs?.description.length).toBeGreaterThan(0);
 
-    // pdf is also a native tool group, so it can't be force-granted as a skill.
-    expect(byName.get("pdf")?.grantable).toBe(false);
+    // pdf is a package skill too: grantable because it lives in the package skills dir.
+    expect(byName.get("pdf")?.grantable).toBe(true);
     // delegate and handoff hold only __pycache__: no SKILL.md, so not skills.
     expect(byName.has("delegate")).toBe(false);
   });
 
-  test("tool groups carry the floor, the tools.yaml states and the native tools", async () => {
+  test("a missing uv is reported as RuntimeUnavailableError", async () => {
     const { projectDir } = await tempDirs();
-    const catalog = new LeleCatalog({ harnessDir: HARNESS, projectDir, homeDir: path.join(root, "no-home") });
-    const groups = await catalog.toolGroups();
-    const byName = new Map(groups.map((group) => [group.name, group]));
-
-    expect(byName.get("bash")?.defaultState).toBe("floor");
-    expect(byName.get("read-file")?.defaultState).toBe("floor");
-    expect(byName.get("todo")?.defaultState).toBe("floor");
-    expect(byName.get("write-file")?.defaultState).toBe("active");
-    expect(byName.get("pdf")?.defaultState).toBe("available");
-    expect(byName.get("web-search")?.defaultState).toBe("disabled");
-    expect(byName.get("bash")?.tools.map((tool) => tool.name)).toEqual(["bash", "bash_output", "bash_kill"]);
-    expect(byName.get("lele-docs")?.source).toBe("skill");
-    expect(catalog.limitations()).toHaveLength(3);
+    const catalog = new LeleCatalog({
+      harnessDir: HARNESS,
+      projectDir,
+      homeDir: path.join(root, "no-home"),
+      scriptPath: INTROSPECT,
+      uvBin: path.join(root, "no-such-uv-binary"),
+    });
+    await expect(catalog.capabilities()).rejects.toBeInstanceOf(RuntimeUnavailableError);
+    await expect(catalog.capabilities()).rejects.toThrow("uv not found; install uv or set UV_BIN");
   });
 
-  test("extensions and plugins come from the home and project .lele folders; project config wins", async () => {
-    const home = path.join(root, "catalog-home");
-    const project = path.join(root, "catalog-project");
-    await mkdir(path.join(home, ".lele", "extensions", "mail"), { recursive: true });
-    await writeFile(path.join(home, ".lele", "extensions", "mail", "extension.py"), "", "utf8");
-    await mkdir(path.join(project, ".lele", "plugins", "goal"), { recursive: true });
-    await writeFile(path.join(project, ".lele", "plugins", "goal", "plugin.py"), "", "utf8");
-    await writeFile(path.join(home, ".lele", "config.yaml"), "extensions:\n  mail: disabled\n", "utf8");
-    await writeFile(path.join(project, ".lele", "config.yaml"), "plugins:\n  goal: available\n", "utf8");
+  test("capabilities are the real lele plugins with their tools; each tool belongs to exactly one capability", async () => {
+    const { projectDir } = await tempDirs();
+    const catalog = new LeleCatalog({ harnessDir: HARNESS, projectDir, homeDir: path.join(root, "no-home"), scriptPath: INTROSPECT });
+    const capabilities = await catalog.capabilities();
+    const byId = new Map(capabilities.map((capability) => [capability.id, capability]));
 
-    const catalog = new LeleCatalog({ harnessDir: HARNESS, projectDir: project, homeDir: home });
-    const groups = await catalog.toolGroups();
-    const mail = groups.find((group) => group.name === "mail");
-    const goal = groups.find((group) => group.name === "goal");
-    expect(mail?.source).toBe("extension");
-    expect(mail?.defaultState).toBe("disabled");
-    expect(goal?.source).toBe("plugin");
-    expect(goal?.defaultState).toBe("available");
-  });
+    const pdf = byId.get("core.pdf");
+    expect(pdf?.runtime).toBe("lele");
+    expect(pdf?.tools.map((tool) => tool.name).sort()).toEqual(["pdf_compose", "pdf_info", "pdf_modify", "pdf_read"]);
+    for (const tool of pdf?.tools ?? []) {
+      expect(tool.deferred).toBe(true);
+      expect(tool.group).toBe("pdf");
+      expect(Object.keys(tool.inputSchema?.properties ?? {}).length).toBeGreaterThan(0);
+    }
+
+    const core = byId.get("core.tools");
+    expect(core?.tools.find((tool) => tool.name === "bash")?.group).toBe("bash");
+    expect(core?.tools.find((tool) => tool.name === "write_file")?.group).toBe("write-file");
+
+    const ids = capabilities.map((capability) => capability.id);
+    expect(ids).toEqual([...ids].sort((a, b) => a.localeCompare(b)));
+
+    const owners = new Map<string, string[]>();
+    for (const capability of capabilities) {
+      for (const tool of capability.tools) {
+        expect(tool.group).not.toBe("");
+        owners.set(tool.name, [...(owners.get(tool.name) ?? []), capability.id]);
+      }
+    }
+    for (const [tool, owned] of owners) {
+      expect({ tool, owners: owned.length }).toEqual({ tool, owners: 1 });
+    }
+    expect(catalog.limitations()).toHaveLength(2);
+  }, 180_000);
 });
 
 describe("LeleExporter", () => {
   test("export produces AGENTS.md and parse reads it back", () => {
     const exporter = new LeleExporter();
-    const spec: LeleAgentSpec = { runtime: "lele", name: "demo", description: "Demo", instructions: "Do it.", tools: { bash: "active" } };
+    const spec: LeleAgentSpec = { runtime: "lele", name: "demo", description: "Demo", instructions: "Do it.", capabilities: { bash: "active" } };
     const exported = exporter.export(spec);
     expect(exported).toEqual({
       name: "demo",

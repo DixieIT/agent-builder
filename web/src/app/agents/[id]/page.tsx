@@ -4,8 +4,21 @@ import { connection } from "next/server";
 import { AgentEditor, type LeleContext } from "@/components/agents/editor";
 import { RepairAgent } from "@/components/agents/repair-agent";
 import { AgentNotFoundError, InvalidAgentDocumentError, InvalidAgentIdError } from "@/core/shared/errors";
-import { agentService, runService, runtimeCatalog } from "@/server/container";
+import type { Capability } from "@/core/capabilities/capability";
+import type { RuntimeSkill } from "@/core/capabilities/capability-catalog.port";
+import { agentService, capabilityCatalog, runService } from "@/server/container";
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function safeLimitations(catalog: { limitations(): string[] }): string[] {
+  try {
+    return catalog.limitations();
+  } catch {
+    return [];
+  }
+}
 
 type Props = { params: Promise<{ id: string }> };
 
@@ -31,9 +44,25 @@ export default async function AgentPage({ params }: Props) {
   const { record } = loaded;
   let lele: LeleContext | undefined;
   if (record.spec.runtime === "lele") {
-    const [catalog, exported] = await Promise.all([runtimeCatalog(), runService().then((runs) => runs.export(record.id))]);
-    const [toolGroups, skills] = await Promise.all([catalog.toolGroups(), catalog.skills()]);
-    lele = { toolGroups, skills, limitations: catalog.limitations(), definition: exported.definition };
+    const [catalog, exported] = await Promise.all([capabilityCatalog(), runService().then((runs) => runs.export(record.id))]);
+    // The harness may be missing or fail to boot: the editor still renders, with the reason stated.
+    const [capabilities, floor, skills] = await Promise.all([
+      catalog.capabilities().then(
+        (list) => ({ list, error: undefined }),
+        (error: unknown) => ({ list: [] as Capability[], error: errorMessage(error) }),
+      ),
+      catalog.grantFloor().catch(() => [] as string[]),
+      catalog.skills().catch(() => [] as RuntimeSkill[]),
+    ]);
+    const limitations = safeLimitations(catalog);
+    lele = {
+      capabilities: capabilities.list,
+      floor,
+      skills,
+      limitations,
+      definition: exported.definition,
+      ...(capabilities.error === undefined ? {} : { catalogError: capabilities.error }),
+    };
   }
   return <AgentEditor id={record.id} spec={record.spec} updatedAt={record.updatedAt.toISOString()} lele={lele} />;
 }

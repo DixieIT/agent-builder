@@ -4,9 +4,10 @@ import { capabilityEntrySchema } from "@/core/agents/agent-spec";
 /**
  * The library: reusable building blocks that live independently of agents and can be dumped to a folder
  * and imported one by one.
- *  - Tool        code + described args + instructions (served to agents as an MCP server / lele extension)
+ *  - Tool        one tool: code + described args + instructions. Not served to agents yet: packaging library
+ *                tools as a capability (an MCP server for Goose, a plugin for lele) is still to be built.
  *  - Skill       a SKILL.md document plus optional supporting files
- *  - Capability  a saved extension config (MCP stdio/http server, Goose extension) ready to attach to agents
+ *  - Capability  a saved Goose capability entry (MCP stdio/http server or Goose extension) to attach to agents
  */
 
 const slug = z.string().regex(/^[a-z0-9][a-z0-9_-]{0,63}$/, "Use lowercase letters, digits, - and _.");

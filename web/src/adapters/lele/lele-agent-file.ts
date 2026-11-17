@@ -41,7 +41,7 @@ export function parseLeleAgentFile(text: string, folderName: string): LeleAgentS
     description,
     ...(model ? { model } : {}),
     instructions: body,
-    tools: normalizeTools(meta),
+    capabilities: normalizeTools(meta),
     ...(meta.hidden === true ? { hidden: true } : {}),
     ...(meta.simple === true ? { simple: true } : {}),
   };
@@ -65,7 +65,7 @@ export function formatLeleAgentFile(spec: LeleAgentSpec): string {
   const meta: Record<string, unknown> = {};
   if (spec.description) meta.description = spec.description;
   if (spec.model) meta.model = spec.model;
-  if (Object.keys(spec.tools).length > 0) meta.tools = { ...spec.tools };
+  if (Object.keys(spec.capabilities).length > 0) meta.tools = { ...spec.capabilities };
   if (spec.hidden) meta.hidden = true;
   if (spec.simple) meta.simple = true;
   return `---\n${stringify(meta, YAML_OPTIONS)}\n---\n${spec.instructions.trim()}\n`;

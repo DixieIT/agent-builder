@@ -49,11 +49,12 @@ export function IconButton({
   label,
   children,
   variant = "ghost",
+  className,
   ...props
 }: { label: string; variant?: "ghost" | "outline" | "default" | "destructive" } & Omit<React.ComponentProps<"button">, "aria-label">) {
   return (
     <Tooltip>
-      <TooltipTrigger render={<Button type="button" variant={variant} size="icon" aria-label={label} className="rounded-full" {...props} />}>
+      <TooltipTrigger render={<Button type="button" variant={variant} size="icon" aria-label={label} className={cn("rounded-full", className)} {...props} />}>
         {children}
       </TooltipTrigger>
       <TooltipContent>{label}</TooltipContent>

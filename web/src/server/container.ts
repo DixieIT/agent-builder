@@ -13,7 +13,7 @@ import type { LibraryRepository } from "@/core/library/library-repository.port";
 import type { AgentExporter } from "@/core/runtime/agent-exporter.port";
 import type { AgentPackager } from "@/core/runtime/agent-packager.port";
 import type { AgentRunner } from "@/core/runtime/agent-runner.port";
-import type { RuntimeCatalog } from "@/core/runtime/runtime-catalog.port";
+import type { CapabilityCatalog } from "@/core/capabilities/capability-catalog.port";
 import { RunService } from "@/core/runtime/run-service";
 import { ImportService } from "@/core/library/import-service";
 import type { BundleCodec } from "@/core/library/bundle.port";
@@ -31,6 +31,8 @@ import { McpToolInspector } from "@/adapters/mcp/mcp-tool-inspector";
  *   ENV_SOURCE    folder (default, ENV_DIR with .env.<environment> files) | sqlite (UAB_DB, encrypted with UAB_SECRET_KEY)
  *   UAB_DB        SQLite file for the library (always) and for sqlite stores; default <repo>/data/uab.sqlite
  *   GOOSE_BIN, DOCKER_BIN, LELE_BIN, LELE_SERVE_URL, LELE_HARNESS_DIR
+ *   UV_BIN                    uv executable used to boot lele's kernel for the capability catalog (default "uv" on PATH)
+ *   LELE_INTROSPECT_SCRIPT    path to the introspect.py that dumps lele's capabilities (default src/adapters/lele/introspect.py under web/)
  *   UAB_API_KEYS  "id:key:scope1|scope2,id2:key2:*" (empty = auth disabled, dev mode)
  */
 
@@ -65,7 +67,7 @@ type Cache = {
   exporters: Partial<Record<Runtime, AgentExporter>>;
   packager?: Promise<AgentPackager>;
   environment?: Promise<EnvironmentStore>;
-  catalog?: Promise<RuntimeCatalog>;
+  catalog?: Promise<CapabilityCatalog>;
   authenticator?: Authenticator;
   credentials?: CredentialStore;
 };
@@ -223,10 +225,16 @@ export function runService(): Promise<RunService> {
   return cache.runs;
 }
 
-export function runtimeCatalog(): Promise<RuntimeCatalog> {
+export function capabilityCatalog(): Promise<CapabilityCatalog> {
   cache.catalog ??= import("@/adapters/lele/lele-catalog").then(
     ({ LeleCatalog }) =>
-      new LeleCatalog({ harnessDir: paths.leleHarness(), projectDir: paths.leleProject(), homeDir: os.homedir(), serveUrl: process.env.LELE_SERVE_URL }),
+      new LeleCatalog({
+        harnessDir: paths.leleHarness(),
+        projectDir: paths.leleProject(),
+        homeDir: os.homedir(),
+        scriptPath: process.env.LELE_INTROSPECT_SCRIPT ?? path.join(process.cwd(), "src", "adapters", "lele", "introspect.py"),
+        uvBin: process.env.UV_BIN,
+      }),
   );
   return cache.catalog;
 }

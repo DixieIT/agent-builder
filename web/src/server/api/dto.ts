@@ -4,7 +4,7 @@ import { z } from "zod";
 import { ENVIRONMENTS, envVarInputSchema, type EnvVar } from "@/core/environment/environment";
 import { capabilitySchema, skillSchema, toolSchema } from "@/core/library/library";
 import type { LibraryRecord } from "@/core/library/library-repository.port";
-import { agentSpecSchema, mcpServerRefSchema } from "@/core/agents/agent-spec";
+import { agentSpecSchema, mcpServerRefSchema, RUNTIMES } from "@/core/agents/agent-spec";
 import type { AgentRecord, AgentSummary } from "@/core/agents/agent-repository.port";
 
 /*
@@ -247,23 +247,24 @@ export function toLibraryRecordDto<T>(record: LibraryRecord<T>): { item: T; crea
 
 // ---------------------------------------------------------------- runtime catalog
 
-const runtimeToolDto = z
+const capabilityToolDto = z
   .object({
     name: z.string(),
     description: z.string().optional(),
-    parameters: jsonSchemaDto.optional(),
+    inputSchema: jsonSchemaDto.optional().meta({ description: "JSON Schema of the arguments, as the model receives it." }),
+    deferred: z.boolean().meta({ description: "Not in the agent's tool list until loaded on demand (lele: load_skill <group>)." }),
+    group: z.string().meta({ description: "Finer grant name inside the capability; equal to the capability id when there are no finer groups." }),
   })
-  .meta({ id: "RuntimeTool" });
+  .meta({ id: "CapabilityTool" });
 
-const runtimeToolGroupDto = z
+const capabilityDto = z
   .object({
-    name: z.string().meta({ description: "The name an agent grants, e.g. write-file or an extension name." }),
-    description: z.string().optional(),
-    source: z.enum(["builtin", "plugin", "extension", "skill"]),
-    defaultState: z.enum(["floor", "active", "available", "disabled"]),
-    tools: z.array(runtimeToolDto),
+    id: z.string().meta({ description: "The grant name: a lele plugin label, a Goose extension name." }),
+    runtime: z.enum(RUNTIMES),
+    description: z.string(),
+    tools: z.array(capabilityToolDto),
   })
-  .meta({ id: "RuntimeToolGroup" });
+  .meta({ id: "Capability" });
 
 const runtimeSkillDto = z
   .object({
@@ -275,10 +276,10 @@ const runtimeSkillDto = z
   })
   .meta({ id: "RuntimeSkill" });
 
-export const runtimeCatalogDto = z
+export const runtimeCapabilitiesDto = z
   .object({
-    toolGroups: z.array(runtimeToolGroupDto),
+    capabilities: z.array(capabilityDto),
     skills: z.array(runtimeSkillDto),
     limitations: z.array(z.string()),
   })
-  .meta({ id: "RuntimeCatalog" });
+  .meta({ id: "RuntimeCapabilities" });
