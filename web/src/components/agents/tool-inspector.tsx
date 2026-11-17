@@ -38,11 +38,14 @@ export function ToolInspector({
   server,
   allowedTools,
   onAllowedToolsChange,
+  readOnly = false,
 }: {
   server: McpServerArgs
   /** allowed tool names; undefined = all tools allowed */
   allowedTools: string[] | undefined
-  onAllowedToolsChange: (tools: string[] | undefined) => void
+  onAllowedToolsChange?: (tools: string[] | undefined) => void
+  /** Lists the server's tools without offering to change which ones are allowed. */
+  readOnly?: boolean
 }) {
   const [result, setResult] = useState<InspectionResult | null>(null)
   const [pending, startTransition] = useTransition()
@@ -77,7 +80,7 @@ export function ToolInspector({
     const next = on
       ? [...new Set([...current, name])]
       : current.filter((n) => n !== name)
-    onAllowedToolsChange(names.every((n) => next.includes(n)) ? undefined : next)
+    onAllowedToolsChange?.(names.every((n) => next.includes(n)) ? undefined : next)
   }
 
   return (
@@ -133,22 +136,25 @@ export function ToolInspector({
             )}
           </div>
 
-          <div className="flex items-center gap-2 text-sm">
-            <Checkbox
-              id={allId}
-              checked={allowedTools === undefined}
-              onCheckedChange={(on) =>
-                onAllowedToolsChange(on ? undefined : names)
-              }
-            />
-            <label htmlFor={allId}>Allow all tools</label>
-          </div>
+          {!readOnly && (
+            <div className="flex items-center gap-2 text-sm">
+              <Checkbox
+                id={allId}
+                checked={allowedTools === undefined}
+                onCheckedChange={(on) =>
+                  onAllowedToolsChange?.(on ? undefined : names)
+                }
+              />
+              <label htmlFor={allId}>Allow all tools</label>
+            </div>
+          )}
 
           <div className="space-y-2">
             {tools.map((tool) => (
               <ToolRow
                 key={tool.name}
                 tool={tool}
+                readOnly={readOnly}
                 checked={
                   allowedTools === undefined || allowedTools.includes(tool.name)
                 }
@@ -172,10 +178,12 @@ function ToolRow({
   tool,
   checked,
   onCheckedChange,
+  readOnly,
 }: {
   tool: ToolDescriptor
   checked: boolean
   onCheckedChange: (on: boolean) => void
+  readOnly: boolean
 }) {
   const [open, setOpen] = useState(false)
   const hints = tool.annotations ?? {}
@@ -193,12 +201,14 @@ function ToolRow({
       className="rounded-xl border bg-card"
     >
       <div className="flex items-start gap-3 p-3">
-        <Checkbox
-          className="mt-0.5"
-          checked={checked}
-          onCheckedChange={onCheckedChange}
-          aria-label={`Allow ${tool.name}`}
-        />
+        {!readOnly && (
+          <Checkbox
+            className="mt-0.5"
+            checked={checked}
+            onCheckedChange={onCheckedChange}
+            aria-label={`Allow ${tool.name}`}
+          />
+        )}
         <CollapsibleTrigger className="flex min-w-0 flex-1 flex-col items-start gap-1 rounded-md text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/50">
           <span className="flex flex-wrap items-center gap-1.5">
             <span className="font-mono text-sm font-medium">{tool.name}</span>

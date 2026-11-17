@@ -45,7 +45,7 @@ interface NodeModule {
 /** Loaded at runtime so bundlers never try to resolve `bun:sqlite` or `node:sqlite` statically. */
 const loadModule = createRequire(import.meta.url);
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 /** Opens (creating the directory and file if needed) the SQLite database at `file`. */
 export function openSqlite(file: string): SqliteDb {
@@ -106,19 +106,87 @@ CREATE TABLE IF NOT EXISTS env_vars (
 );
 `;
 
-/** Creates the tables that are missing and records the schema version. Safe to run on every start. */
+/**
+ * v2: projects. Agents are scoped to a project (their key becomes (project_id, id)); existing agents move to "default".
+ * SQLite cannot change a primary key in place, so `agents` is rebuilt. Idempotent: skipped when project_id exists.
+ */
+const SCHEMA_V2 = `
+CREATE TABLE IF NOT EXISTS projects (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  systems TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+`;
+
+const DEFAULT_PROJECT = "default";
+
+/** Applies the v2 changes. Runs inside the caller's transaction. */
+function migrateAgentsToProjects(db: SqliteDb): void {
+  const columns = db.all<{ name: string }>("PRAGMA table_info(agents)");
+  if (!columns.some((column) => column.name === "project_id")) {
+    db.exec(`
+DROP TABLE IF EXISTS agents_v2;
+CREATE TABLE agents_v2 (
+  project_id TEXT NOT NULL DEFAULT '${DEFAULT_PROJECT}',
+  id TEXT NOT NULL,
+  spec TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (project_id, id)
+);
+INSERT INTO agents_v2 (project_id, id, spec, created_at, updated_at)
+  SELECT '${DEFAULT_PROJECT}', id, spec, created_at, updated_at FROM agents;
+DROP TABLE agents;
+ALTER TABLE agents_v2 RENAME TO agents;
+`);
+  }
+}
+
+/** Steps in order. A database at version N runs every step above N. */
+const MIGRATIONS: { version: number; run: (db: SqliteDb) => void }[] = [
+  { version: 1, run: (db) => db.exec(SCHEMA_V1) },
+  {
+    version: 2,
+    run: (db) => {
+      db.exec(SCHEMA_V2);
+      migrateAgentsToProjects(db);
+      db.run(
+        "INSERT OR IGNORE INTO projects (id, name, description, systems, created_at, updated_at) VALUES (?, ?, '', '[]', ?, ?)",
+        DEFAULT_PROJECT,
+        "Default",
+        new Date().toISOString(),
+        new Date().toISOString(),
+      );
+    },
+  },
+];
+
+/** Creates or upgrades the tables and records the schema version. Safe to run on every start. */
 export function migrate(db: SqliteDb): void {
   db.exec("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)");
   const current = db.get<{ version: number }>("SELECT COALESCE(MAX(version), 0) AS version FROM schema_version")?.version ?? 0;
-  if (current >= SCHEMA_VERSION) return;
-  try {
-    db.exec(`BEGIN;\n${SCHEMA_V1}\nINSERT INTO schema_version (version) VALUES (${SCHEMA_VERSION});\nCOMMIT;`);
-  } catch (error) {
+  for (const step of MIGRATIONS) {
+    if (step.version <= current) continue;
     try {
-      db.exec("ROLLBACK");
-    } catch {
-      // No transaction open; the original error is the one to report.
+      db.exec("BEGIN");
+      step.run(db);
+      db.run("INSERT INTO schema_version (version) VALUES (?)", step.version);
+      db.exec("COMMIT");
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {
+        // No transaction open; the original error is the one to report.
+      }
+      throw error;
     }
-    throw error;
   }
 }

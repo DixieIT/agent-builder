@@ -80,3 +80,29 @@ export class ReadOnlyAgentError extends DomainError {
     super(`Agent "${id}" is defined in the ${location} layer and is read-only here.`);
   }
 }
+
+/** No agent system is configured under this id (see AGENT_SYSTEMS). Maps to 404. */
+export class AgentSystemNotFoundError extends DomainError {
+  constructor(readonly id: string) {
+    super(`Agent system "${id}" is not configured. Check AGENT_SYSTEMS.`);
+  }
+}
+
+export class ProjectNotFoundError extends DomainError {
+  constructor(readonly id: string) {
+    super(`Project "${id}" does not exist.`);
+  }
+}
+
+export class ProjectConflictError extends DomainError {
+  constructor(readonly id: string) {
+    super(`A project with id "${id}" already exists.`);
+  }
+}
+
+/** The project cannot be removed (the default project holds every pre-project agent). Maps to 409. */
+export class ProjectProtectedError extends DomainError {
+  constructor(readonly id: string) {
+    super(`Project "${id}" is protected and cannot be removed.`);
+  }
+}

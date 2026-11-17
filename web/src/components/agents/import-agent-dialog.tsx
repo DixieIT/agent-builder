@@ -10,13 +10,9 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import type { ImportReport } from "@/core/library/import-service";
+import { readPickedFolder, type PickedFolder } from "@/lib/picked-folder";
 
-/** Text files a bundle can hold; everything else (images, binaries, node_modules) is left out of the upload. */
-const IMPORTABLE = /\.(ya?ml|md|py|ts|sh|txt|json)$/i;
-const SKIP_DIR = /(^|\/)(\.git|node_modules|\.venv|__pycache__)(\/|$)/;
-const MAX_FILE = 1_000_000;
-
-type Picked = { name: string; files: { path: string; content: string }[]; skipped: number };
+type Picked = PickedFolder;
 
 export function ImportAgentDialog() {
   const router = useRouter();
@@ -30,20 +26,7 @@ export function ImportAgentDialog() {
   async function pickFolder(list: FileList | null) {
     setReport(null);
     if (!list?.length) return;
-    const all = Array.from(list);
-    const name = all[0].webkitRelativePath.split("/")[0] || "folder";
-    const files: Picked["files"] = [];
-    let skipped = 0;
-    for (const file of all) {
-      // Paths come as "<picked folder>/<rest>"; the server recreates the folder under its own name.
-      const rel = file.webkitRelativePath.split("/").slice(1).join("/");
-      if (!rel || SKIP_DIR.test(rel) || !IMPORTABLE.test(rel) || file.size > MAX_FILE) {
-        skipped++;
-        continue;
-      }
-      files.push({ path: rel, content: await file.text() });
-    }
-    setPicked({ name, files, skipped });
+    setPicked(await readPickedFolder(list));
   }
 
   function importFolder() {

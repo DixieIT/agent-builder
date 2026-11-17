@@ -6,6 +6,7 @@ import { capabilitySchema, skillSchema, toolSchema } from "@/core/library/librar
 import type { LibraryRecord } from "@/core/library/library-repository.port";
 import { agentSpecSchema, mcpServerRefSchema, RUNTIMES } from "@/core/agents/agent-spec";
 import type { AgentRecord, AgentSummary } from "@/core/agents/agent-repository.port";
+import { projectInputSchema, systemSourceSchema, type Project } from "@/core/projects/project";
 
 /*
  * Wire format of the REST API. Each named schema carries `.meta({ id })`, so buildOpenApi emits it as a component.
@@ -175,6 +176,25 @@ export function toSummaryDto(summary: AgentSummary): z.infer<typeof agentSummary
   return { ...summary, updatedAt: summary.updatedAt.toISOString() };
 }
 
+// ---------------------------------------------------------------- projects
+
+export const projectInputDto = projectInputSchema.meta({ id: "ProjectInput" });
+
+export const projectDto = z
+  .object({
+    id: z.string().meta({ description: "Slug of the name, unique among projects." }),
+    name: z.string(),
+    description: z.string(),
+    systems: z.array(systemSourceSchema).meta({ description: "External agent systems attached to the project." }),
+    createdAt: iso,
+    updatedAt: iso,
+  })
+  .meta({ id: "Project" });
+
+export function toProjectDto(project: Project): z.infer<typeof projectDto> {
+  return { ...project, createdAt: project.createdAt.toISOString(), updatedAt: project.updatedAt.toISOString() };
+}
+
 // ---------------------------------------------------------------- environment
 
 const envSourceDto = z
@@ -283,3 +303,63 @@ export const runtimeCapabilitiesDto = z
     limitations: z.array(z.string()),
   })
   .meta({ id: "RuntimeCapabilities" });
+
+// ---------------------------------------------------------------- agent systems
+
+export const agentSystemInfoDto = z
+  .object({
+    id: z.string().meta({ description: "Stable id used in URLs, e.g. builder, lele." }),
+    label: z.string(),
+    kind: z.string().meta({ description: "Adapter kind: builder-store, lele, fs, sqlite." }),
+    location: z.string().meta({ description: "Where the agents live: a folder, a database file, a URL." }),
+    editable: z.boolean().meta({ description: "Whether the builder can edit these agents." }),
+  })
+  .meta({ id: "AgentSystemInfo" });
+
+export const agentListingDto = z
+  .object({
+    id: z.string(),
+    name: z.string(),
+    description: z.string().optional(),
+    model: z.string().optional(),
+    capabilityCount: z.number().int(),
+    subAgentCount: z.number().int(),
+    problem: z.string().optional().meta({ description: "Set when the agent couldn't be read." }),
+  })
+  .meta({ id: "AgentListing" });
+
+const capabilityToolAccessDto = z.enum(["granted", "on-demand", "denied", "unknown"]);
+
+export const capabilityViewDto = z
+  .object({
+    capability: capabilityDto,
+    tools: z.array(z.object({ tool: capabilityToolDto, access: capabilityToolAccessDto })),
+    note: z.string().optional(),
+    inspectable: z.unknown().optional().meta({ description: "Present when the tools can be listed live (an MCP server): what the inspector needs." }),
+  })
+  .meta({ id: "CapabilityView" });
+
+export const subAgentLinkDto = z
+  .object({
+    id: z.string(),
+    via: z.string().meta({ description: 'How the delegation is declared, e.g. "subagent tool", "sub_recipe".' }),
+  })
+  .meta({ id: "SubAgentLink" });
+
+export const agentDescriptorDto = z
+  .object({
+    id: z.string(),
+    name: z.string(),
+    description: z.string().optional(),
+    model: z.string().optional(),
+    instructions: z.string().optional(),
+    capabilities: z.array(capabilityViewDto),
+    subAgents: z.array(subAgentLinkDto),
+    facts: z.array(z.object({ label: z.string(), value: z.string() })),
+    native: z
+      .object({ format: z.string(), text: z.string() })
+      .optional()
+      .meta({ description: "The agent as the system stores it, for view source." }),
+    editPath: z.string().optional().meta({ description: "Builder editor path when the agent is editable here." }),
+  })
+  .meta({ id: "AgentDescriptor" });

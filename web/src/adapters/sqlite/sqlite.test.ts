@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { rmSync } from "node:fs";
+import { removeDir } from "./remove-dir";
 import os from "node:os";
 import path from "node:path";
 
@@ -39,10 +39,10 @@ describe("sqlite adapter", () => {
     plain = createSqliteStores(file);
   });
 
-  afterAll(() => {
+  afterAll(async () => {
     stores.db.close();
     plain.db.close();
-    rmSync(path.dirname(file), { recursive: true, force: true });
+    await removeDir(path.dirname(file));
   });
 
   test("agents: create, get, list, save, conflict and remove", async () => {

@@ -9,8 +9,12 @@
  *   bun run agents verify                               check the MongoDB agent store (AGENT_STORE=mongo)
  *   bun run agents init                                 create or update the MongoDB collection, validator and indexes
  *   bun run agents dump <dir>                           write all agents and library items as a folder bundle
- *   bun run agents import <path> [--dry-run]            import a tool/skill/capability/agent item, or a whole bundle
+ *   bun run agents import <path> [--dry-run] [--project <id>]  import a tool/skill/capability/agent item, or a whole bundle
  *   bun run agents library [tools|skills|capabilities]  list library items (SQLite)
+ *   bun run agents systems                              list the agent systems in AGENT_SYSTEMS
+ *   bun run agents inspect <system> [agent]             list a system's agents, or describe one (capabilities, tools, sub-agents)
+ *   bun run agents config list|get|set|unset            saved settings (non-secret; secrets go under Environment)
+ *   bun run agents projects list|create|use|show        projects: their agents and systems
  *   bun run agents help                                 show usage
  *
  * Options: --uri <mongodb-uri>, --db <database> override MONGODB_URI / MONGODB_DB.
@@ -24,8 +28,10 @@ import type { BundleContent } from "../src/core/library/bundle.port";
 import type { LibraryItem, LibraryKind } from "../src/core/library/library";
 import type { LibraryRepository } from "../src/core/library/library-repository.port";
 import type { AgentRunner, RunEvent } from "../src/core/runtime/agent-runner.port";
+import type { AgentDescriptor } from "../src/core/systems/agent-system";
+import type { SettingsStore } from "../src/core/projects/project-repository.port";
 
-const COMMANDS = ["list", "run", "chat", "verify", "init", "dump", "import", "library", "help"] as const;
+const COMMANDS = ["list", "run", "chat", "verify", "init", "dump", "import", "library", "systems", "inspect", "config", "projects", "help"] as const;
 
 const USAGE = `Usage: bun run agents <command> [options]
 
@@ -39,7 +45,38 @@ Commands:
   import <path>           Import one item (tools/<name>, skills/<name>, capabilities/<name>.yaml, agents/<id>),
                           any folder of items (agents/, .lele/agents, Goose recipes) or a whole bundle
   library [kind]          List library items (kind: tools, skills or capabilities; default all)
+  systems                 List the agent systems configured in AGENT_SYSTEMS
+  inspect <system> [agent]
+                          List a system's agents with capability and sub-agent counts, or describe one:
+                          its model, facts, capabilities with each tool's access, and sub-agents
+  config list             List saved settings (values of secret-looking keys are masked)
+  config get <KEY>        Print one saved setting
+  config set <KEY> <value>
+                          Save a setting. Keys are UPPER_SNAKE_CASE. Secrets are refused: add
+                          them under Environment (ENV_SOURCE) instead
+  config unset <KEY>      Remove a saved setting
+  projects list           List projects; the current one is marked
+  projects create <name> [--description text]
+                          Create a project with its own agent store
+  projects use <id>       Make a project the current one (config set UAB_PROJECT <id>)
+  projects show [id]      A project's systems and agent count (default: the current project)
   help                    Show this message
+
+Saved settings (config set; env vars set in the shell win over them):
+  AGENT_SYSTEMS           Agent systems to explore, comma-separated (default "builder")
+  AGENT_STORE             Agent store: fs (default), sqlite, mongo or lele
+  UAB_PROJECT             The current project's id (set with projects use)
+  LELE_PROJECT_DIR        lele project folder (AGENT_STORE=lele)
+  LELE_HARNESS_DIR        lele-harness checkout (the built-in lele agents)
+  ENV_SOURCE              Where environment variables live: folder (default) or sqlite
+  ENV_DIR                 Folder of .env files when ENV_SOURCE=folder (default env/)
+  (litellm:<url> in AGENT_SYSTEMS or a project's systems reads a LiteLLM gateway; key: LITELLM_API_KEY in Environment)
+
+Agent systems (AGENT_SYSTEMS, comma-separated, default "builder"):
+  builder                 the builder's own store (AGENT_STORE)
+  lele:<projectDir>       a lele project's agents (its .lele/agents plus the global and bundled layers)
+  fs:<dir>                a folder of builder agent specs (read-only)
+  sqlite:<file>           a builder SQLite store (read-only)
 
 Run and chat options:
   --param key=value       Template variable for the agent (repeatable)
@@ -49,6 +86,10 @@ Run and chat options:
 
 Import options:
   --dry-run               Read and validate the bundle, save nothing
+  --project <id>          Import into that project's agent store (default: the builder's store)
+
+Project options:
+  --description <text>    Description for projects create
 
 Environment:
   AGENT_STORE             fs (default; AGENTS_DIR, else ../agents), mongo (MONGODB_URI, MONGODB_DB)
@@ -66,15 +107,21 @@ interface Options {
   /** The first argument after the command: an agent id, a bundle path or a library kind. */
   arg?: string;
   agentId?: string;
+  /** Every positional argument after the command (inspect takes a system and an agent). */
+  args: string[];
   overrides: CliOverrides;
   params: Record<string, string>;
   prompt?: string;
   yaml: boolean;
   dryRun: boolean;
   environment: Environment;
+  /** import --project: the project whose store receives the items. */
+  project?: string;
+  /** projects create --description. */
+  description?: string;
 }
 
-const VALUE_FLAGS = new Set(["--uri", "--db", "--param", "--prompt", "--env"]);
+const VALUE_FLAGS = new Set(["--uri", "--db", "--param", "--prompt", "--env", "--project", "--description"]);
 
 function parseArgs(argv: string[]): Options {
   const positional: string[] = [];
@@ -124,12 +171,15 @@ function parseArgs(argv: string[]): Options {
     command,
     arg: positional[1],
     agentId: positional[1],
+    args: positional.slice(1),
     overrides: { uri: flags.get("--uri"), db: flags.get("--db") },
     params,
     prompt: flags.get("--prompt"),
     yaml,
     dryRun,
     environment,
+    project: flags.get("--project"),
+    description: flags.get("--description"),
   };
 }
 
@@ -236,18 +286,19 @@ async function streamRun(events: AsyncIterable<RunEvent>, signal: AbortSignal): 
 // ---- commands ----------------------------------------------------------------------------------
 
 async function list(cli: CliComposition): Promise<number> {
-  const summaries = await cli.service.list();
+  const summaries = await (await cli.service()).list();
   console.log(`${summaries.length} agent(s) in ${cli.label} (AGENT_STORE=${cli.store})`);
   printAgents(summaries);
   return 0;
 }
 
 async function storeChecks(cli: CliComposition, command: "verify" | "init"): Promise<number> {
-  if (!cli.provisionable) {
+  const provisionable = await cli.provisionable();
+  if (!provisionable) {
     fail(`verify/init apply to the mongo and sqlite stores (current store: ${cli.store}).`);
     return 1;
   }
-  const checks = command === "init" ? await cli.provisionable.provision() : await cli.provisionable.verify();
+  const checks = command === "init" ? await provisionable.provision() : await provisionable.verify();
   printChecks(checks);
   const failed = checks.filter((check) => !check.ok).length;
   console.log(failed === 0 ? "\nAll checks passed." : `\n${failed} check(s) failed.`);
@@ -356,12 +407,13 @@ async function allLibraryItems(library: LibraryRepository): Promise<LibraryItem[
 async function dump(cli: CliComposition, options: Options): Promise<number> {
   if (!options.arg) throw new Error(`"dump" needs a directory, e.g. bun run agents dump ./bundle.`);
   const agents: BundleContent["agents"] = [];
-  for (const summary of await cli.service.list()) {
+  const service = await cli.service();
+  for (const summary of await service.list()) {
     if (summary.problem) {
       warn(`Skipped agent ${summary.id}: ${summary.problem}`);
       continue;
     }
-    const record = await cli.service.get(summary.id);
+    const record = await service.get(summary.id);
     agents.push({ id: record.id, spec: record.spec });
   }
   const items = await allLibraryItems(await cli.library());
@@ -374,7 +426,8 @@ async function dump(cli: CliComposition, options: Options): Promise<number> {
 async function importBundle(cli: CliComposition, options: Options): Promise<number> {
   if (!options.arg) throw new Error(`"import" needs a path, e.g. bun run agents import tools/search_docs.`);
   const content = await cli.bundle.read(options.arg);
-  const report = await (await cli.importer()).import(content, { dryRun: options.dryRun });
+  const importer = options.project ? await cli.projectImporter(options.project) : await cli.importer();
+  const report = await importer.import(content, { dryRun: options.dryRun });
   for (const line of report.lines) {
     const label = `${line.kind} ${line.name}`;
     console.log(line.ok ? `✔ ${label}${line.replaced ? " (replaced)" : ""}` : `✖ ${label}: ${line.message}`);
@@ -425,6 +478,205 @@ async function listLibrary(cli: CliComposition, options: Options): Promise<numbe
   return 0;
 }
 
+// ---- agent systems -----------------------------------------------------------------------------
+
+/** Pads each column to its widest cell. The first row is the header. */
+function printRows(rows: string[][]): void {
+  const widths = rows[0].map((_, column) => Math.max(...rows.map((row) => (row[column] ?? "").length)));
+  for (const row of rows) {
+    const line = row.map((cell, column) => (column === row.length - 1 ? cell : cell.padEnd(widths[column]))).join("  ");
+    console.log(line.trimEnd());
+  }
+}
+
+async function listSystems(cli: CliComposition): Promise<number> {
+  const infos = (await cli.systems()).map((system) => system.info());
+  console.log(`${infos.length} system(s) (AGENT_SYSTEMS)`);
+  printRows([
+    ["id", "label", "kind", "editable", "location"],
+    ...infos.map((info) => [info.id, info.label, info.kind, info.editable ? "yes" : "no", info.location]),
+  ]);
+  return 0;
+}
+
+async function inspectSystem(cli: CliComposition, options: Options): Promise<number> {
+  if (!options.arg) throw new Error(`"inspect" needs a system id, e.g. bun run agents inspect lele. List them with bun run agents systems.`);
+  const system = await cli.system(options.arg);
+  const agentId = options.args[1];
+  if (agentId) {
+    printAgent(await system.describe(agentId));
+    return 0;
+  }
+  const info = system.info();
+  const listings = await system.list();
+  console.log(`${info.label} (${info.kind}): ${listings.length} agent(s) at ${info.location}`);
+  printRows([
+    ["id", "name", "model", "capabilities", "sub-agents", "problem"],
+    ...listings.map((row) => [row.id, row.name, row.model ?? "-", String(row.capabilityCount), String(row.subAgentCount), row.problem ?? ""]),
+  ]);
+  return 0;
+}
+
+function printAgent(agent: AgentDescriptor): void {
+  console.log(`${agent.name} (${agent.id})`);
+  if (agent.description) console.log(`  ${agent.description}`);
+  console.log(`  model: ${agent.model ?? "-"}`);
+  for (const fact of agent.facts) console.log(`  ${fact.label}: ${fact.value}`);
+  if (agent.editPath) console.log(`  editable in the builder: ${agent.editPath}`);
+
+  console.log(`\nCapabilities (${agent.capabilities.length}):`);
+  if (agent.capabilities.length === 0) console.log("  none");
+  for (const view of agent.capabilities) {
+    const description = view.capability.description ? ` - ${view.capability.description}` : "";
+    console.log(`  ${view.capability.id}${description}`);
+    if (view.tools.length > 0) {
+      const width = Math.max(...view.tools.map(({ tool }) => tool.name.length));
+      for (const { tool, access } of view.tools) console.log(`    ${tool.name.padEnd(width)}  ${access}`);
+    }
+    if (view.note) console.log(`    note: ${view.note}`);
+  }
+
+  console.log(`\nSub-agents (${agent.subAgents.length}):`);
+  if (agent.subAgents.length === 0) console.log("  none");
+  for (const link of agent.subAgents) console.log(`  ${link.id}  (${link.via})`);
+}
+
+// ---- settings and projects ---------------------------------------------------------------------
+
+/** Keys that look like credentials. They never go in the saved settings: they belong under Environment. */
+const SECRET_KEY = /KEY|SECRET|TOKEN|PASSWORD/;
+const SETTING_NAME = /^[A-Z][A-Z0-9_]*$/;
+const CURRENT_PROJECT = "UAB_PROJECT";
+
+function settingName(key: string | undefined): string {
+  if (!key) throw new Error(`Give a setting name in UPPER_SNAKE_CASE, e.g. bun run agents config get AGENT_STORE.`);
+  if (!SETTING_NAME.test(key)) throw new Error(`Setting names are UPPER_SNAKE_CASE (A-Z, 0-9 and _), got "${key}".`);
+  return key;
+}
+
+const shown = (key: string, value: string) => (SECRET_KEY.test(key) ? "********" : value);
+
+/** The current project: the UAB_PROJECT environment variable, else the saved setting. */
+function currentProjectId(settings: SettingsStore): string | undefined {
+  return process.env[CURRENT_PROJECT] || settings.get(CURRENT_PROJECT) || undefined;
+}
+
+async function config(cli: CliComposition, options: Options): Promise<number> {
+  const [sub, key, ...rest] = options.args;
+  switch (sub) {
+    case "list": {
+      const all = (await cli.settings()).all();
+      const keys = Object.keys(all).sort();
+      if (keys.length === 0) {
+        console.log("No settings saved. Save one with bun run agents config set <KEY> <value>.");
+        return 0;
+      }
+      const width = Math.max(...keys.map((name) => name.length));
+      for (const name of keys) console.log(`${name.padEnd(width)}  ${shown(name, all[name])}`);
+      return 0;
+    }
+    case "get": {
+      const name = settingName(key);
+      const value = (await cli.settings()).get(name);
+      if (value === undefined) {
+        console.error(`${name} is not set.`);
+        return 1;
+      }
+      console.log(shown(name, value));
+      return 0;
+    }
+    case "set": {
+      const name = settingName(key);
+      if (SECRET_KEY.test(name)) {
+        console.error(`Secrets don't go in the config: add ${name} under Environment (ENV_SOURCE) instead.`);
+        return 1;
+      }
+      if (rest.length === 0) throw new Error(`"config set" needs a value, e.g. bun run agents config set ${name} value.`);
+      (await cli.settings()).set(name, rest.join(" "));
+      console.log(`Saved ${name}.`);
+      return 0;
+    }
+    case "unset": {
+      const name = settingName(key);
+      const settings = await cli.settings();
+      if (settings.get(name) === undefined) {
+        console.log(`${name} was not set.`);
+        return 0;
+      }
+      settings.unset(name);
+      console.log(`Removed ${name}.`);
+      return 0;
+    }
+    default:
+      console.error("Usage: bun run agents config list | get <KEY> | set <KEY> <value> | unset <KEY>");
+      return 1;
+  }
+}
+
+async function projects(cli: CliComposition, options: Options): Promise<number> {
+  const [sub, ...rest] = options.args;
+  const repository = await cli.projects();
+  switch (sub) {
+    case "list": {
+      const all = await repository.list();
+      if (all.length === 0) {
+        console.log("No projects yet. Create one with bun run agents projects create <name>.");
+        return 0;
+      }
+      const current = currentProjectId(await cli.settings());
+      console.log(`${all.length} project(s)`);
+      printRows([
+        ["id", "name", "systems", "current", "description"],
+        ...all.map((project) => [project.id, project.name, String(project.systems.length), project.id === current ? "*" : "", project.description]),
+      ]);
+      return 0;
+    }
+    case "create": {
+      const name = rest.join(" ").trim();
+      if (!name) throw new Error(`"projects create" needs a name, e.g. bun run agents projects create "My team".`);
+      const project = await repository.create({ name, description: options.description ?? "", systems: [] });
+      console.log(`Created project ${project.id} (${project.name}).`);
+      console.log(`Use it with: bun run agents projects use ${project.id}`);
+      return 0;
+    }
+    case "use": {
+      const id = rest[0];
+      if (!id) throw new Error(`"projects use" needs a project id, e.g. bun run agents projects use my-team.`);
+      const project = await repository.get(id);
+      (await cli.settings()).set(CURRENT_PROJECT, project.id);
+      console.log(`Current project: ${project.id} (${project.name}).`);
+      const fromEnvironment = process.env[CURRENT_PROJECT];
+      if (fromEnvironment && fromEnvironment !== project.id) warn(`${CURRENT_PROJECT} is also set in the environment (${fromEnvironment}); the environment value wins.`);
+      return 0;
+    }
+    case "show": {
+      const id = rest[0] ?? currentProjectId(await cli.settings());
+      if (!id) throw new Error(`No project given. Pass an id, or pick one with bun run agents projects use <id>.`);
+      const project = await repository.get(id);
+      const [agents, systems] = await Promise.all([repository.agents(project.id).list(), cli.projectSystems(project.id)]);
+      console.log(`${project.name} (${project.id})`);
+      if (project.description) console.log(`  ${project.description}`);
+      console.log(`  agents: ${agents.length}`);
+      console.log(`\nSystems (${systems.length}):`);
+      if (systems.length === 0) {
+        console.log("  none");
+        return 0;
+      }
+      printRows([
+        ["id", "label", "kind", "editable", "location"],
+        ...systems.map((system) => {
+          const info = system.info();
+          return [info.id, info.label, info.kind, info.editable ? "yes" : "no", info.location];
+        }),
+      ]);
+      return 0;
+    }
+    default:
+      console.error("Usage: bun run agents projects list | create <name> [--description text] | use <id> | show [id]");
+      return 1;
+  }
+}
+
 // ---- entry -------------------------------------------------------------------------------------
 
 async function main(options: Options): Promise<number> {
@@ -456,6 +708,14 @@ async function main(options: Options): Promise<number> {
         return await importBundle(cli, options);
       case "library":
         return await listLibrary(cli, options);
+      case "systems":
+        return await listSystems(cli);
+      case "inspect":
+        return await inspectSystem(cli, options);
+      case "config":
+        return await config(cli, options);
+      case "projects":
+        return await projects(cli, options);
       default:
         return 1;
     }

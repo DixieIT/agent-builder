@@ -16,12 +16,17 @@ import {
   agentRepository,
   agentExporter,
   agentRunner,
+  agentSystem,
+  agentSystems,
   bundleCodec,
   importService,
   runService,
   agentService,
   environmentStore,
   libraryRepository,
+  projectImportService,
+  projectOwnSystem,
+  projectRepository,
   capabilityCatalog,
   storeKind,
   toolInspector,
@@ -29,8 +34,11 @@ import {
 import { toToolSource } from "@/server/tool-source";
 import { uploadedFolderSchema, withUploadedFolder } from "@/server/uploaded-folder";
 import {
+  agentDescriptorDto,
+  agentListingDto,
   agentRecordDto,
   agentSpecDto,
+  agentSystemInfoDto,
   agentSummaryDto,
   buildContextDto,
   buildRequestDto,
@@ -41,6 +49,9 @@ import {
   inspectionResultDto,
   libraryRecordDto,
   mcpServerRefDto,
+  projectDto,
+  projectInputDto,
+  toProjectDto,
   resolveEnvironmentRequestDto,
   resolveEnvironmentResultDto,
   runRequestDto,
@@ -646,4 +657,162 @@ export const importFolder = defineRoute({
     const report = await withUploadedFolder(body.name, body.files, async (dir) => importer.import(await codec.read(dir), { dryRun: body.dryRun }));
     return json(report);
   },
+});
+
+// ---------------------------------------------------------------- projects
+
+const projectParams = z.object({ project: z.string().meta({ description: "Project id, from GET /projects." }) });
+
+export const listProjects = defineRoute({
+  method: "get",
+  path: "/projects",
+  operationId: "listProjects",
+  summary: "List projects",
+  description:
+    "Projects group agents and the external agent systems they connect to. `default` always exists and holds the agents from before projects.",
+  tags: ["Projects"],
+  responses: { 200: { description: "Projects, oldest first.", schema: z.array(projectDto) } },
+  handler: async () => json((await (await projectRepository()).list()).map(toProjectDto)),
+});
+
+export const createProject = defineRoute({
+  method: "post",
+  path: "/projects",
+  operationId: "createProject",
+  summary: "Create a project",
+  description: "The id is a slug of the name, made unique (name, name-2...).",
+  tags: ["Projects"],
+  body: projectInputDto,
+  responses: { 201: { description: "The created project.", schema: projectDto } },
+  handler: async ({ body }) => json(toProjectDto(await (await projectRepository()).create(body)), 201),
+});
+
+export const getProject = defineRoute({
+  method: "get",
+  path: "/projects/{project}",
+  operationId: "getProject",
+  summary: "Get a project",
+  tags: ["Projects"],
+  params: projectParams,
+  responses: {
+    200: { description: "The project.", schema: projectDto },
+    404: { description: "No project with this id." },
+  },
+  handler: async ({ params }) => json(toProjectDto(await (await projectRepository()).get(params.project))),
+});
+
+export const updateProject = defineRoute({
+  method: "put",
+  path: "/projects/{project}",
+  operationId: "updateProject",
+  summary: "Update a project",
+  description: "Replaces the name, description and systems. The id and the agents stay.",
+  tags: ["Projects"],
+  params: projectParams,
+  body: projectInputDto,
+  responses: {
+    200: { description: "The updated project.", schema: projectDto },
+    404: { description: "No project with this id." },
+  },
+  handler: async ({ params, body }) => json(toProjectDto(await (await projectRepository()).update(params.project, body))),
+});
+
+export const deleteProject = defineRoute({
+  method: "delete",
+  path: "/projects/{project}",
+  operationId: "deleteProject",
+  summary: "Delete a project",
+  description: "Removes the project and its agents. The `default` project cannot be removed.",
+  tags: ["Projects"],
+  params: projectParams,
+  responses: {
+    204: { description: "Deleted." },
+    404: { description: "No project with this id." },
+    409: { description: "The project is protected (`default`)." },
+  },
+  handler: async ({ params }) => {
+    await (await projectRepository()).remove(params.project);
+    return new Response(null, { status: 204 });
+  },
+});
+
+export const listProjectAgents = defineRoute({
+  method: "get",
+  path: "/projects/{project}/agents",
+  operationId: "listProjectAgents",
+  summary: "List a project's agents",
+  description: "The project's own agents, as its agent system lists them. External systems are under /systems.",
+  tags: ["Projects"],
+  params: projectParams,
+  responses: {
+    200: { description: "Agent listings; unreadable agents carry a problem.", schema: z.array(agentListingDto) },
+    404: { description: "No project with this id." },
+  },
+  handler: async ({ params }) => json(await (await projectOwnSystem(params.project)).list()),
+});
+
+export const importIntoProject = defineRoute({
+  method: "post",
+  path: "/projects/{project}/import",
+  operationId: "importIntoProject",
+  summary: "Import a folder into a project",
+  description: "Same body and report as POST /import, but agents land in this project. Library items (tools, skills, capabilities) stay shared.",
+  tags: ["Projects"],
+  params: projectParams,
+  body: importFolderDto,
+  responses: {
+    200: { description: "One line per item.", schema: importReportDto },
+    404: { description: "No project with this id." },
+  },
+  handler: async ({ params, body }) => {
+    const importer = await projectImportService(params.project);
+    const codec = bundleCodec();
+    const report = await withUploadedFolder(body.name, body.files, async (dir) => importer.import(await codec.read(dir), { dryRun: body.dryRun }));
+    return json(report);
+  },
+});
+
+// ---------------------------------------------------------------- agent systems
+
+const systemParams = z.object({ system: z.string().meta({ description: "Agent system id, from GET /systems." }) });
+const systemAgentParams = systemParams.extend({ agent: z.string().meta({ description: "Agent id within the system." }) });
+
+export const listSystems = defineRoute({
+  method: "get",
+  path: "/systems",
+  operationId: "listSystems",
+  summary: "List agent systems",
+  description: "The agentic systems configured in AGENT_SYSTEMS (builder, lele projects, folders, SQLite stores).",
+  tags: ["Systems"],
+  responses: { 200: { description: "Systems, in configuration order.", schema: z.array(agentSystemInfoDto) } },
+  handler: async () => json((await agentSystems()).map((system) => system.info())),
+});
+
+export const listSystemAgents = defineRoute({
+  method: "get",
+  path: "/systems/{system}/agents",
+  operationId: "listSystemAgents",
+  summary: "List a system's agents",
+  tags: ["Systems"],
+  params: systemParams,
+  responses: {
+    200: { description: "Agent listings; unreadable agents carry a problem.", schema: z.array(agentListingDto) },
+    404: { description: "No system with this id." },
+  },
+  handler: async ({ params }) => json(await (await agentSystem(params.system)).list()),
+});
+
+export const getSystemAgent = defineRoute({
+  method: "get",
+  path: "/systems/{system}/agents/{agent}",
+  operationId: "getSystemAgent",
+  summary: "Describe an agent in a system",
+  description: "Capabilities with per-tool access, sub-agents, facts and the agent as the system stores it.",
+  tags: ["Systems"],
+  params: systemAgentParams,
+  responses: {
+    200: { description: "The agent.", schema: agentDescriptorDto },
+    404: { description: "No system or agent with this id." },
+  },
+  handler: async ({ params }) => json(await (await agentSystem(params.system)).describe(params.agent)),
 });

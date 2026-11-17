@@ -10,7 +10,8 @@ import type { JsonSchemaObject } from "@/core/tools/tool-inspector.port";
 export interface Capability {
   /** The grant name: a lele plugin label, a Goose extension name. */
   id: string;
-  runtime: Runtime;
+  /** The system it belongs to: a builder runtime (goose, lele) or any other kind (litellm, ...). */
+  runtime: Runtime | (string & {});
   description: string;
   tools: CapabilityTool[];
 }

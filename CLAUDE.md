@@ -18,6 +18,11 @@ These are binding. `bun test` in `web/` enforces the checkable ones (`web/src/ar
 - **Goose** is the runtime: specs export to Goose recipes (`adapters/goose`), run with the Goose CLI and package into a Docker image.
 - No mocks or fake data in the product: tool lists come from real MCP servers; if something can't be inspected, say so in the UI.
 
+## Agent systems
+- The explorer (`/systems` pages, `GET /api/v1/systems`, `bun run agents inspect`) works for **any** agentic or multi-agent system through the `AgentSystem` port (`src/core/systems/agent-system.port.ts`). The read model (`agent-system.ts`) is runtime-neutral: agents, capabilities with per-tool access, sub-agent links, facts.
+- Which systems are shown is set by `AGENT_SYSTEMS` (comma-separated, default `builder`): `builder`, `lele:<projectDir>`, `fs:<dir>`, `sqlite:<file>`. The container builds them (`agentSystems()` in `src/server/container.ts`).
+- To add a system (e.g. a database another platform keeps its agents in): write `src/adapters/systems/<name>-agent-system.ts` implementing the port (or wrap its `AgentRepository` in `RepositoryAgentSystem`), add a colocated test calling `agentSystemContract(...)`, and add one case in the container's `buildAgentSystems()`. Then list it in `AGENT_SYSTEMS`.
+
 ## Tests
 - Tests live **next to the code they test**: `src/adapters/sqlite/sqlite.test.ts`, `src/core/agents/agent-spec.test.ts`. No top-level `test/` folder. Project-wide rules live in `src/architecture.test.ts`.
 - Every adapter ships with its test. Run everything with `bun test`, one feature with `bun test src/adapters/<name>`.

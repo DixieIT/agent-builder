@@ -1,5 +1,6 @@
 import "server-only";
 
+import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { Authenticator } from "@/core/auth/authenticator.port";
@@ -24,6 +25,15 @@ import { EnvCredentialStore } from "@/adapters/auth/env-credential-store";
 import { MemoryEventBus } from "@/adapters/events/memory-event-bus";
 import { GooseExporter } from "@/adapters/goose/goose-exporter";
 import { McpToolInspector } from "@/adapters/mcp/mcp-tool-inspector";
+import { RepositoryAgentSystem } from "@/adapters/systems/repository-agent-system";
+import type { AgentSystemInfo } from "@/core/systems/agent-system";
+import type { AgentSystem } from "@/core/systems/agent-system.port";
+import type { Project, SystemSource } from "@/core/projects/project";
+import type { ProjectRepository, SettingsStore } from "@/core/projects/project-repository.port";
+import { AgentSystemNotFoundError } from "@/core/shared/errors";
+import type { SqliteStores } from "@/adapters/sqlite";
+import { openSqlite } from "@/adapters/sqlite/sqlite-db";
+import { SqliteSettingsStore } from "@/adapters/sqlite/sqlite-settings-store";
 
 /**
  * Composition root: the only place that knows which adapter backs each port.
@@ -34,6 +44,14 @@ import { McpToolInspector } from "@/adapters/mcp/mcp-tool-inspector";
  *   UV_BIN                    uv executable used to boot lele's kernel for the capability catalog (default "uv" on PATH)
  *   LELE_INTROSPECT_SCRIPT    path to the introspect.py that dumps lele's capabilities (default src/adapters/lele/introspect.py under web/)
  *   UAB_API_KEYS  "id:key:scope1|scope2,id2:key2:*" (empty = auth disabled, dev mode)
+ *   AGENT_SYSTEMS comma-separated systems the explorer inspects (default "builder"):
+ *                 builder            the builder's own store (AGENT_STORE); editable here
+ *                 lele:<projectDir>  a lele project's agents (.lele/agents, global and bundled layers); editable only for LELE_PROJECT_DIR
+ *                 fs:<dir>           a folder of builder agent specs (read-only)
+ *                 sqlite:<file>      a builder SQLite store (read-only)
+ *               Adding a kind (another platform's database, a Goose recipe folder...): write ONE adapter implementing
+ *               core/systems/agent-system.port.ts (or a RepositoryAgentSystem over its AgentRepository), add a colocated test
+ *               calling agentSystemContract(...), then one case in buildAgentSystems() below. Nothing else changes.
  */
 
 export type StoreKind = "fs" | "mongo" | "sqlite" | "lele";
@@ -56,6 +74,28 @@ const paths = {
   leleHarness: () => process.env.LELE_HARNESS_DIR ?? path.resolve(REPO_ROOT, "..", "lele-harness"),
 };
 
+applySavedSettings();
+
+/**
+ * Settings saved with `agents config set` (the settings table) become defaults for process.env; variables set in
+ * the real environment still win. Synchronous, once per process. Never throws: a missing file or a database
+ * without the table (before schema v2) just means no saved settings.
+ */
+function applySavedSettings(): void {
+  try {
+    const file = paths.db();
+    if (!existsSync(file)) return;
+    const db = openSqlite(file);
+    try {
+      for (const [key, value] of Object.entries(new SqliteSettingsStore(db).all())) process.env[key] ??= value;
+    } finally {
+      db.close();
+    }
+  } catch {
+    // Nothing saved yet, or the file is not a readable builder database: run on the environment alone.
+  }
+}
+
 type Cache = {
   sqlite?: Promise<Awaited<ReturnType<typeof openSqliteStores>>>;
   repository?: Promise<AgentRepository>;
@@ -67,9 +107,12 @@ type Cache = {
   exporters: Partial<Record<Runtime, AgentExporter>>;
   packager?: Promise<AgentPackager>;
   environment?: Promise<EnvironmentStore>;
-  catalog?: Promise<CapabilityCatalog>;
+  catalogs?: Map<string, Promise<CapabilityCatalog>>;
   authenticator?: Authenticator;
   credentials?: CredentialStore;
+  systems?: Promise<AgentSystem[]>;
+  /** SQLite stores opened for sqlite:<file> sources (AGENT_SYSTEMS and projects), one per file, closed with the container. */
+  systemStores?: Map<string, SqliteStores>;
 };
 // Survives Next.js dev hot reloads so we keep one database handle, one Mongo pool and one event bus.
 const cache = ((globalThis as { __uabContainer?: Cache }).__uabContainer ??= { runners: {}, exporters: {} });
@@ -137,10 +180,204 @@ export function bundleCodec(): BundleCodec {
 export async function closeContainer(): Promise<void> {
   if (cache.sqlite) await cache.sqlite.then((stores) => stores.db.close(), () => undefined);
   cache.sqlite = undefined;
+  for (const stores of cache.systemStores?.values() ?? []) stores.db.close();
+  cache.systemStores = undefined;
+  cache.systems = undefined;
+}
+
+/** Every agent system configured in AGENT_SYSTEMS, in the order given. Built once per process. */
+export function agentSystems(): Promise<AgentSystem[]> {
+  cache.systems ??= retryable(buildAgentSystems(), () => (cache.systems = undefined));
+  return cache.systems;
+}
+
+export async function agentSystem(id: string): Promise<AgentSystem> {
+  const found = (await agentSystems()).find((system) => system.info().id === id);
+  if (!found) throw new AgentSystemNotFoundError(id);
+  return found;
+}
+
+const SYSTEM_KIND_NAMES = ["builder", "lele", "fs", "sqlite"];
+const SYSTEM_KINDS = "builder, lele:<dir>, fs:<dir>, sqlite:<file>";
+
+async function buildAgentSystems(): Promise<AgentSystem[]> {
+  const taken = new Set<string>();
+  const systems: AgentSystem[] = [];
+  const entries = (process.env.AGENT_SYSTEMS ?? "builder").split(",").map((entry) => entry.trim()).filter(Boolean);
+  for (const entry of entries) {
+    const colon = entry.indexOf(":");
+    const kind = colon === -1 ? entry : entry.slice(0, colon);
+    const arg = colon === -1 ? "" : entry.slice(colon + 1).trim();
+    if (!SYSTEM_KIND_NAMES.includes(kind)) {
+      throw new Error(`AGENT_SYSTEMS: unknown system kind "${kind}" in "${entry}". Valid kinds: ${SYSTEM_KINDS}.`);
+    }
+    const needsArg = kind !== "builder";
+    if (needsArg !== Boolean(arg)) {
+      throw new Error(`AGENT_SYSTEMS entry "${entry}" is ${needsArg ? `missing its path (use ${kind}:<path>)` : "not allowed a path"}. Valid kinds: ${SYSTEM_KINDS}.`);
+    }
+    if (kind === "builder") {
+      systems.push(
+        new RepositoryAgentSystem(
+          { id: uniqueId("builder", taken), label: "Builder", kind: "builder-store", location: describeStore(), editable: true },
+          await agentRepository(),
+          exporterFor,
+          () => capabilityCatalog(),
+          (id) => `/agents/${id}`,
+        ),
+      );
+      continue;
+    }
+    const system = await systemFromSource({ kind, location: arg }, taken);
+    if (system) systems.push(system);
+  }
+  if (systems.length === 0) throw new Error(`AGENT_SYSTEMS is empty. Valid kinds: ${SYSTEM_KINDS}.`);
+  return systems;
+}
+
+/**
+ * One agent system from a source: an AGENT_SYSTEMS entry or a project's `systems` item. Unknown kinds are skipped
+ * with a warning (undefined is returned).
+ */
+export async function systemFromSource(source: SystemSource, taken: Set<string>): Promise<AgentSystem | undefined> {
+  const { kind, location } = source;
+  switch (kind) {
+    case "lele": {
+      const projectDir = path.resolve(location);
+      const { LeleAgentRepository } = await import("@/adapters/lele/lele-agent-repository");
+      const editable = projectDir === path.resolve(paths.leleProject()) && storeKind() === "lele";
+      const info: AgentSystemInfo = {
+        id: uniqueId("lele", taken),
+        label: source.label ?? `lele · ${path.basename(projectDir)}`,
+        kind: "lele",
+        location: path.join(projectDir, ".lele", "agents"),
+        editable,
+      };
+      const repository = new LeleAgentRepository({
+        projectDir,
+        globalDir: path.join(os.homedir(), ".lele", "agents"),
+        builtinDir: path.join(paths.leleHarness(), "lele_harness", "agents"),
+      });
+      return new RepositoryAgentSystem(info, repository, exporterFor, () => capabilityCatalog(projectDir), editable ? (id) => `/agents/${id}` : undefined);
+    }
+    case "fs": {
+      const dir = path.resolve(location);
+      const { FsAgentRepository } = await import("@/adapters/persistence/fs-agent-repository");
+      const info: AgentSystemInfo = {
+        id: uniqueId("fs", taken),
+        label: source.label ?? `fs · ${path.basename(dir)}`,
+        kind: "fs",
+        location: dir,
+        editable: false,
+      };
+      return new RepositoryAgentSystem(info, new FsAgentRepository(dir), exporterFor, () => capabilityCatalog());
+    }
+    case "sqlite": {
+      const file = path.resolve(location);
+      const stores = await systemStoresFor(file);
+      const info: AgentSystemInfo = {
+        id: uniqueId("sqlite", taken),
+        label: source.label ?? `sqlite · ${path.basename(file)}`,
+        kind: "sqlite",
+        location: file,
+        editable: false,
+      };
+      return new RepositoryAgentSystem(info, stores.agents, exporterFor, () => capabilityCatalog());
+    }
+    case "litellm": {
+      // The key is a secret: from the process env, else the environment store (Environment page / ENV_SOURCE).
+      const apiKey =
+        process.env.LITELLM_API_KEY ??
+        (await environmentStore()
+          .then((store) => store.resolve("development", ["LITELLM_API_KEY"]))
+          .then(({ values }) => values.LITELLM_API_KEY)
+          .catch(() => undefined));
+      const { LiteLlmAgentSystem } = await import("@/adapters/litellm/litellm-agent-system");
+      return new LiteLlmAgentSystem({ id: uniqueId("litellm", taken), baseUrl: location, apiKey, label: source.label });
+    }
+    default:
+      console.warn(`Skipping agent system of unknown kind "${kind}" (${location}).`);
+      return undefined;
+  }
+}
+
+/** One SQLite store per file for sqlite systems, shared by AGENT_SYSTEMS and projects; closed with the container. */
+async function systemStoresFor(file: string): Promise<SqliteStores> {
+  cache.systemStores ??= new Map();
+  let stores = cache.systemStores.get(file);
+  if (!stores) {
+    const { createSqliteStores } = await import("@/adapters/sqlite");
+    stores = createSqliteStores(file, process.env.UAB_SECRET_KEY);
+    cache.systemStores.set(file, stores);
+  }
+  return stores;
+}
+
+/** "builder", then "builder-2", "builder-3"... so repeated entries keep distinct ids. */
+function uniqueId(base: string, taken: Set<string>): string {
+  let id = base;
+  for (let n = 2; taken.has(id); n++) id = `${base}-${n}`;
+  taken.add(id);
+  return id;
 }
 
 export async function libraryRepository(): Promise<LibraryRepository> {
   return (await sqlite()).library;
+}
+
+/** Projects live in the builder's SQLite database. */
+export async function projectRepository(): Promise<ProjectRepository> {
+  return (await sqlite()).projects;
+}
+
+export async function settingsStore(): Promise<SettingsStore> {
+  return (await sqlite()).settings;
+}
+
+/** A project's own agents: always in SQLite, scoped to the project. Unknown projects throw ProjectNotFoundError. */
+export async function projectAgentRepository(projectId: string): Promise<AgentRepository> {
+  return (await projectRepository()).agents(projectId);
+}
+
+export async function projectAgentService(projectId: string): Promise<AgentService> {
+  return new AgentService(await projectAgentRepository(projectId), agentEvents());
+}
+
+export async function projectImportService(projectId: string): Promise<ImportService> {
+  return new ImportService(await projectAgentService(projectId), await projectAgentRepository(projectId), libraryRepository, exporterFor);
+}
+
+/** The project's own agents as an agent system (id "project", editable here). */
+export async function projectOwnSystem(projectId: string): Promise<AgentSystem> {
+  const project: Project = await (await projectRepository()).get(projectId);
+  return new RepositoryAgentSystem(
+    {
+      id: "project",
+      label: project.name,
+      kind: "project",
+      location: `${paths.db()}#${projectId}`,
+      // Agents are imported and inspected here; the spec editor works on the builder store (/agents) for now.
+      editable: false,
+    },
+    await projectAgentRepository(projectId),
+    exporterFor,
+    () => capabilityCatalog(),
+  );
+}
+
+/**
+ * Every agent system a project shows: its own agents first (system id "project"), then one per entry of its
+ * `systems`, built like AGENT_SYSTEMS entries.
+ */
+export async function projectSystems(projectId: string): Promise<AgentSystem[]> {
+  const own = await projectOwnSystem(projectId);
+  const project = await (await projectRepository()).get(projectId);
+  const taken = new Set<string>([own.info().id]);
+  const systems: AgentSystem[] = [own];
+  for (const source of project.systems) {
+    const system = await systemFromSource(source, taken);
+    if (system) systems.push(system);
+  }
+  return systems;
 }
 
 export function environmentStore(): Promise<EnvironmentStore> {
@@ -225,18 +462,25 @@ export function runService(): Promise<RunService> {
   return cache.runs;
 }
 
-export function capabilityCatalog(): Promise<CapabilityCatalog> {
-  cache.catalog ??= import("@/adapters/lele/lele-catalog").then(
-    ({ LeleCatalog }) =>
-      new LeleCatalog({
-        harnessDir: paths.leleHarness(),
-        projectDir: paths.leleProject(),
-        homeDir: os.homedir(),
-        scriptPath: process.env.LELE_INTROSPECT_SCRIPT ?? path.join(process.cwd(), "src", "adapters", "lele", "introspect.py"),
-        uvBin: process.env.UV_BIN,
-      }),
-  );
-  return cache.catalog;
+/** lele's capabilities as seen from `projectDir` (its project plugins and extensions count). One catalog per project. */
+export function capabilityCatalog(projectDir: string = paths.leleProject()): Promise<CapabilityCatalog> {
+  const key = path.resolve(projectDir).toLowerCase();
+  cache.catalogs ??= new Map();
+  let catalog = cache.catalogs.get(key);
+  if (!catalog) {
+    catalog = import("@/adapters/lele/lele-catalog").then(
+      ({ LeleCatalog }) =>
+        new LeleCatalog({
+          harnessDir: paths.leleHarness(),
+          projectDir,
+          homeDir: os.homedir(),
+          scriptPath: process.env.LELE_INTROSPECT_SCRIPT ?? path.join(process.cwd(), "src", "adapters", "lele", "introspect.py"),
+          uvBin: process.env.UV_BIN,
+        }),
+    );
+    cache.catalogs.set(key, catalog);
+  }
+  return catalog;
 }
 
 export function authenticator(): Authenticator {

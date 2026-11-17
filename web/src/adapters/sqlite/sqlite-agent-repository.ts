@@ -7,6 +7,7 @@ import type {
   StoreCheck,
 } from "@/core/agents/agent-repository.port";
 import { type AgentSpec, agentSpecSchema, capabilityCount, type SpecIssue } from "@/core/agents/agent-spec";
+import { DEFAULT_PROJECT_ID } from "@/core/projects/project";
 import {
   AgentConflictError,
   AgentNotFoundError,
@@ -24,15 +25,19 @@ interface AgentRow {
 
 const COLUMNS = "id, spec, created_at, updated_at";
 
-/** Agents as rows of the `agents` table; the spec is stored as JSON. Errors follow the AgentRepository contract. */
+/**
+ * Agents as rows of the `agents` table; the spec is stored as JSON. Every query is scoped to one project.
+ * Errors follow the AgentRepository contract.
+ */
 export class SqliteAgentRepository implements AgentRepository, ProvisionableStore {
   constructor(
     private readonly db: SqliteDb,
     private readonly file: string,
+    private readonly projectId: string = DEFAULT_PROJECT_ID,
   ) {}
 
   async list(): Promise<AgentSummary[]> {
-    const rows = this.db.all<AgentRow>(`SELECT ${COLUMNS} FROM agents ORDER BY updated_at DESC`);
+    const rows = this.db.all<AgentRow>(`SELECT ${COLUMNS} FROM agents WHERE project_id = ? ORDER BY updated_at DESC`, this.projectId);
     return rows.map(summarize);
   }
 
@@ -51,7 +56,8 @@ export class SqliteAgentRepository implements AgentRepository, ProvisionableStor
     if (this.hasRow(id)) throw new AgentConflictError(id);
     const now = new Date().toISOString();
     this.db.run(
-      "INSERT INTO agents (id, spec, created_at, updated_at) VALUES (?, ?, ?, ?)",
+      "INSERT INTO agents (project_id, id, spec, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+      this.projectId,
       id,
       JSON.stringify(valid),
       now,
@@ -64,8 +70,9 @@ export class SqliteAgentRepository implements AgentRepository, ProvisionableStor
     const valid = validated(spec);
     const now = new Date().toISOString();
     this.db.run(
-      `INSERT INTO agents (id, spec, created_at, updated_at) VALUES (?, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET spec = excluded.spec, updated_at = excluded.updated_at`,
+      `INSERT INTO agents (project_id, id, spec, created_at, updated_at) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(project_id, id) DO UPDATE SET spec = excluded.spec, updated_at = excluded.updated_at`,
+      this.projectId,
       id,
       JSON.stringify(valid),
       now,
@@ -77,7 +84,7 @@ export class SqliteAgentRepository implements AgentRepository, ProvisionableStor
   }
 
   async remove(id: AgentId): Promise<void> {
-    const { changes } = this.db.run("DELETE FROM agents WHERE id = ?", id);
+    const { changes } = this.db.run("DELETE FROM agents WHERE project_id = ? AND id = ?", this.projectId, id);
     if (changes === 0) throw new AgentNotFoundError(id);
   }
 
@@ -91,11 +98,11 @@ export class SqliteAgentRepository implements AgentRepository, ProvisionableStor
   }
 
   private row(id: string): AgentRow | undefined {
-    return this.db.get<AgentRow>(`SELECT ${COLUMNS} FROM agents WHERE id = ?`, id);
+    return this.db.get<AgentRow>(`SELECT ${COLUMNS} FROM agents WHERE project_id = ? AND id = ?`, this.projectId, id);
   }
 
   private hasRow(id: string): boolean {
-    return this.db.get<{ found: number }>("SELECT 1 AS found FROM agents WHERE id = ?", id) !== undefined;
+    return this.db.get<{ found: number }>("SELECT 1 AS found FROM agents WHERE project_id = ? AND id = ?", this.projectId, id) !== undefined;
   }
 
   private checkDatabase(): StoreCheck {
@@ -114,7 +121,7 @@ export class SqliteAgentRepository implements AgentRepository, ProvisionableStor
 
   private checkDocuments(): StoreCheck {
     try {
-      const rows = this.db.all<AgentRow>(`SELECT ${COLUMNS} FROM agents`);
+      const rows = this.db.all<AgentRow>(`SELECT ${COLUMNS} FROM agents WHERE project_id = ?`, this.projectId);
       const invalid = rows.filter((row) => parseStored(row.spec).spec === undefined).map((row) => row.id);
       const ok = invalid.length === 0;
       return {
