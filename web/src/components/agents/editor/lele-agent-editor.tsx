@@ -28,6 +28,7 @@ import type { RuntimeSkill } from "@/core/capabilities/capability-catalog.port";
 import {
   capabilityAccess,
   grantCapability,
+  normalizeGrants,
   LELE_AGENT_FLOOR,
   revokeCapability,
   setToolAccess,
@@ -64,7 +65,11 @@ export function LeleAgentEditor({ id, initialSpec, updatedAt, capabilities, floo
   const errors = issues.filter((i) => i.severity === "error");
   const fieldError = (path: string) => errors.find((i) => i.path === path)?.message;
   const grants = spec.capabilities as Grants;
-  const setGrants = (next: Grants) => update((d) => void (d.capabilities = next));
+  // Every edit is stored in canonical form: whole capabilities first, finer grants only for exceptions.
+  // Skill names stay as written (granting one also force-loads the skill in lele).
+  const skillNames = useMemo(() => new Set(skills.map((s) => s.name)), [skills]);
+  const setGrants = (next: Grants) =>
+    update((d) => void (d.capabilities = capabilities.length ? normalizeGrants(next, capabilities, floor, skillNames) : next));
 
   const included = capabilities.filter((c) => capabilityAccess(c, grants, floor) !== "none");
   const available = capabilities.filter((c) => capabilityAccess(c, grants, floor) === "none");

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Capability } from "./capability";
-import { capabilityAccess, grantCapability, revokeCapability, setToolAccess, toolAccess, type Grants } from "./lele-access";
+import { capabilityAccess, grantCapability, normalizeGrants, revokeCapability, setToolAccess, toolAccess, type Grants } from "./lele-access";
 
 /** Shapes taken from a real lele boot (profile "coding"). */
 const coreTools: Capability = {
@@ -77,5 +77,47 @@ describe("editing grants", () => {
     expect(setToolAccess(off, web, web.tools[1], true)).toEqual({ "core.web.tool": "active" });
     expect(setToolAccess({}, coreTools, coreTools.tools[4], true)).toEqual({ write_file: "active" });
     expect(setToolAccess({}, coreTools, coreTools.tools[0], false)).toEqual({ bash: "disabled" });
+  });
+});
+
+describe("normalizeGrants", () => {
+  const edit: Capability = { id: "core.edit", runtime: "lele", description: "", tools: [{ name: "apply_patch", group: "edit-file", deferred: false }] };
+  const all = [coreTools, pdf, web, edit];
+  const accessOf = (grants: Grants) => Object.fromEntries(all.flatMap((c) => c.tools.map((t) => [t.name, toolAccess(c, t, grants)])));
+
+  test("the web-researcher grants collapse to whole capabilities, with the same access", () => {
+    const messy: Grants = {
+      "web-search": "active",
+      "web-fetch": "active",
+      "write-file": "disabled",
+      "edit-file": "disabled",
+      "core.pdf": "active",
+      write_file: "active",
+    };
+    const clean = normalizeGrants(messy, all);
+    // bash and read_file come from the floor, so granting write_file completes core.tools.
+    expect(clean).toEqual({ "core.web.tool": "active", "core.pdf": "active", "core.tools": "active" });
+    expect(accessOf(clean)).toEqual(accessOf(messy));
+  });
+
+  test("removing floor tools stays explicit; untouched grants stay empty", () => {
+    expect(normalizeGrants({}, all)).toEqual({});
+    const noBash = normalizeGrants({ bash: "disabled", bash_output: "active" }, all);
+    expect(accessOf(noBash)).toEqual(accessOf({ bash: "disabled", bash_output: "active" }));
+    expect(noBash).toEqual({ bash: "disabled", bash_output: "active" });
+  });
+
+  test("skill names and unknown keys are kept as written", () => {
+    const grants: Grants = { pdf: "active", "lele-docs": "active", "my-extension": "active" };
+    const clean = normalizeGrants(grants, all, undefined, new Set(["pdf", "lele-docs"]));
+    expect(clean).toEqual(grants);
+  });
+
+  test("any grant set normalizes to the same access (exhaustive over core.tools grants)", () => {
+    const keys = ["core.tools", "bash", "read-file", "write-file", "bash_output", "write_file"];
+    const states = [undefined, "active", "disabled"] as const;
+    const combos = (i: number): Grants[] =>
+      i === keys.length ? [{}] : combos(i + 1).flatMap((rest) => states.map((s) => (s ? { ...rest, [keys[i]]: s } : rest)));
+    for (const grants of combos(0)) expect(accessOf(normalizeGrants(grants, all))).toEqual(accessOf(grants));
   });
 });

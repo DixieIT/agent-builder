@@ -33,7 +33,7 @@ describe("ImportService", () => {
 
       const record = await repository.get("web-researcher" as never);
       expect(record.spec.runtime).toBe("lele");
-      if (record.spec.runtime === "lele") expect(record.spec.capabilities["web-search"]).toBe("active");
+      if (record.spec.runtime === "lele") expect(record.spec.capabilities["core.web.tool"]).toBe("active");
 
       const again = await importer.import(await new FsBundleCodec().read(EXAMPLES));
       expect(again.lines.every((l) => l.replaced)).toBe(true);

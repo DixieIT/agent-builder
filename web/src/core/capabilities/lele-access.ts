@@ -73,6 +73,40 @@ export function revokeCapability(grants: Grants, capability: Capability, floor: 
   return next;
 }
 
+/**
+ * Rewrites grants into the fewest, least specific grants that give exactly the same access:
+ * a whole capability becomes `<plugin>: active`, then groups, then single tools only for the exceptions.
+ * Redundant and contradictory grants disappear (`write-file: disabled` + `write_file: active` -> `write-file: active`).
+ * Keys in `preserve` (e.g. skill names, which also force-load a skill) and keys no capability knows are kept as written.
+ */
+export function normalizeGrants(
+  grants: Grants,
+  capabilities: Capability[],
+  floor: readonly string[] = LELE_AGENT_FLOOR,
+  preserve: ReadonlySet<string> = new Set(),
+): Grants {
+  const capabilityKeys = new Set(capabilities.flatMap((c) => [c.id, ...c.tools.flatMap((t) => [t.name, t.group])]));
+  const wanted = new Map<CapabilityTool, boolean>();
+  for (const c of capabilities) for (const t of c.tools) wanted.set(t, toolAccess(c, t, grants, floor) !== "denied");
+
+  const next: Grants = {};
+  for (const [key, grant] of Object.entries(grants)) if (preserve.has(key) || !capabilityKeys.has(key)) next[key] = grant;
+
+  for (const c of capabilities) {
+    const has = (t: CapabilityTool) => toolAccess(c, t, next, floor) !== "denied";
+    const want = (t: CapabilityTool) => wanted.get(t) ?? false;
+    if (c.tools.every(want) && !c.tools.every(has)) next[c.id] = "active";
+    for (const group of new Set(c.tools.map((t) => t.group))) {
+      if (group === c.id || preserve.has(group)) continue;
+      const tools = c.tools.filter((t) => t.group === group);
+      if (tools.every(want) && !tools.every(has)) next[group] = "active";
+      else if (!tools.some(want) && tools.some(has)) next[group] = "disabled";
+    }
+    for (const t of c.tools) if (want(t) !== has(t)) next[t.name] = want(t) ? "active" : "disabled";
+  }
+  return next;
+}
+
 /** Turns one tool on or off with the most specific grant (its name), then drops grants that became redundant. */
 export function setToolAccess(grants: Grants, capability: Capability, tool: CapabilityTool, on: boolean, floor: readonly string[] = LELE_AGENT_FLOOR): Grants {
   const next = { ...grants };
