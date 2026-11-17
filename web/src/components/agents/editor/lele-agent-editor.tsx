@@ -251,13 +251,18 @@ function ToggleRow({ id, label, hint, checked, onChange }: { id: string; label: 
   );
 }
 
-const STATE_LABEL: Record<RuntimeToolGroup["defaultState"], string> = {
-  floor: "always on",
-  active: "on by default",
-  available: "on demand",
-  disabled: "off by default",
+/** How the main lele agent gets the group; shown for context. Sub-agents only get floor groups and their grants. */
+const MAIN_AGENT: Record<RuntimeToolGroup["defaultState"], string> = {
+  floor: "always granted, also to sub-agents (switch off to remove it)",
+  active: "the main agent has it; a sub-agent only when switched on here",
+  available: "loaded on demand (load_skill or a matching file); switch on to give it from the start",
+  disabled: "off in this lele installation",
 };
 
+/**
+ * One switch per group, matching what lele actually does for a sub-agent (`active ∪ floor − disabled`):
+ * floor groups are on unless set to disabled; every other group is on only when granted `active`.
+ */
 function GrantRow(props: {
   name: string;
   description?: string;
@@ -267,41 +272,23 @@ function GrantRow(props: {
   value: LeleGrant | undefined;
   onChange: (choice: GrantChoice) => void;
 }) {
-  const choices: { value: GrantChoice; label: string }[] = [
-    { value: "default", label: "Default" },
-    { value: "active", label: "On" },
-    { value: "disabled", label: "Off" },
-  ];
-  const current: GrantChoice = props.value ?? "default";
+  const floor = props.defaultState === "floor";
+  const on = floor ? props.value !== "disabled" : props.value === "active";
+  const toggle = (next: boolean) => props.onChange(floor ? (next ? "default" : "disabled") : next ? "active" : "default");
   return (
     <li className="flex items-center gap-3 px-4 py-2.5">
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
-          <span className="font-mono text-sm">{props.name}</span>
-          <Hint>
-            {[props.description, props.meta && `Tools: ${props.meta}`, `${props.source}, ${STATE_LABEL[props.defaultState]}`].filter(Boolean).join(" · ")}
-          </Hint>
-        </div>
+      <div className="flex min-w-0 flex-1 items-center gap-2">
+        <span className={cn("font-mono text-sm", !on && "text-muted-foreground")}>{props.name}</span>
+        {props.defaultState === "available" ? (
+          <Badge variant="outline" className="rounded-full text-[10px]">
+            on demand
+          </Badge>
+        ) : null}
+        <Hint>
+          {[props.description, props.meta && `Tools: ${props.meta}`, `${props.source}: ${MAIN_AGENT[props.defaultState]}`].filter(Boolean).join(" · ")}
+        </Hint>
       </div>
-      <div role="radiogroup" aria-label={`Grant for ${props.name}`} className="inline-flex rounded-full border bg-muted p-0.5">
-        {choices.map((choice) => (
-          <button
-            key={choice.value}
-            type="button"
-            role="radio"
-            aria-checked={current === choice.value}
-            onClick={() => props.onChange(choice.value)}
-            className={cn(
-              "rounded-full px-2.5 py-0.5 text-xs font-medium text-muted-foreground transition-colors",
-              current === choice.value && "bg-card text-foreground shadow-sm",
-              current === choice.value && choice.value === "active" && "bg-primary text-primary-foreground",
-              current === choice.value && choice.value === "disabled" && "bg-destructive/15 text-destructive",
-            )}
-          >
-            {choice.label}
-          </button>
-        ))}
-      </div>
+      <Switch aria-label={`${props.name} for this agent`} checked={on} onCheckedChange={toggle} />
     </li>
   );
 }

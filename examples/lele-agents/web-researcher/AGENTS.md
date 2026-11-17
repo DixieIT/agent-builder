@@ -3,6 +3,7 @@ description: Researches a question on the web and answers with sources
 tools:
   web-search: active
   web-fetch: active
+  pdf: active
   write-file: disabled
   edit-file: disabled
 ---

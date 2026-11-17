@@ -72,7 +72,7 @@ export class LeleCatalog implements RuntimeCatalog {
     const groups: RuntimeToolGroup[] = BUILTIN_GROUPS.map((group): RuntimeToolGroup => ({
       name: group.name,
       source: "builtin",
-      defaultState: group.floor ? "floor" : (toState(states.get(group.name)) ?? "disabled"),
+      defaultState: group.floor ? "floor" : (toState(states.get(group.name)) ?? "active"),
       tools: group.tools.map((name): RuntimeTool => ({ name })),
     }));
 

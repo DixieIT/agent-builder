@@ -6,7 +6,7 @@ Example lele sub-agents, one folder each (`<name>/AGENTS.md`), in the format `le
 | --- | --- | --- |
 | `code-reviewer` | Reports bugs in a diff or files, never edits | read-only |
 | `test-writer` | Writes and runs tests next to the code | write-file, edit-file |
-| `web-researcher` | Answers with web sources | web-search, web-fetch, read-only |
+| `web-researcher` | Answers with web sources, reads PDFs | web-search, web-fetch, pdf, read-only |
 | `docs-writer` | Writes docs from the code as it is | write-file, edit-file |
 | `task-lead` | Splits work across sub-agents and verifies it | subagent, write-file, edit-file |
 
