@@ -19,7 +19,8 @@ import { createInterface } from "node:readline";
 import path from "node:path";
 import { compose, type CliComposition, type CliOverrides } from "./compose";
 import type { AgentSummary, StoreCheck } from "../src/core/agents/agent-repository.port";
-import { parseAgentId } from "../src/core/agents/agent-id";
+import { parseAgentId, slugifyAgentId } from "../src/core/agents/agent-id";
+import { validateAgentSpec } from "../src/core/agents/agent-spec";
 import { ENVIRONMENTS, type Environment } from "../src/core/environment/environment";
 import type { BundleContent } from "../src/core/library/bundle.port";
 import type { LibraryItem, LibraryKind } from "../src/core/library/library";
@@ -37,8 +38,8 @@ Commands:
   verify                  Check the MongoDB agent store (AGENT_STORE=mongo); exits 1 on failure
   init                    Create or update the MongoDB collection, validator and indexes, then check
   dump <dir>              Write all agents and library items to <dir> as a folder bundle
-  import <path>           Import one item (tools/<name>, skills/<name>, capabilities/<name>.yaml,
-                          agents/<id>) or a whole bundle folder into the library and agent store
+  import <path>           Import one item (tools/<name>, skills/<name>, capabilities/<name>.yaml, agents/<id>),
+                          any folder of items (agents/, .lele/agents, Goose recipes) or a whole bundle
   library [kind]          List library items (kind: tools, skills or capabilities; default all)
   help                    Show this message
 
@@ -193,8 +194,14 @@ async function checkRunner(runner: AgentRunner): Promise<string | null> {
 async function streamRun(events: AsyncIterable<RunEvent>, signal: AbortSignal): Promise<number> {
   let finished: { exitCode: number | null } | undefined;
   let failure: string | undefined;
+  let atLineStart = true;
+  const EOL = "\n";
 
   for await (const event of events) {
+    if (event.type !== "run.output" && !atLineStart) {
+      process.stdout.write(EOL);
+      atLineStart = true;
+    }
     switch (event.type) {
       case "run.tool":
         status(`  -> ${event.name}${event.output === undefined ? "" : " done"}`);
@@ -204,6 +211,7 @@ async function streamRun(events: AsyncIterable<RunEvent>, signal: AbortSignal): 
         break;
       case "run.output":
         (event.stream === "stderr" ? process.stderr : process.stdout).write(event.text);
+        if (event.text) atLineStart = event.text.endsWith(EOL);
         break;
       case "run.finished":
         finished = { exitCode: event.exitCode };
@@ -388,6 +396,26 @@ async function importBundle(cli: CliComposition, options: Options): Promise<numb
   const content = await cli.bundle.read(options.arg);
   const library = options.dryRun ? undefined : await cli.library();
   let failures = 0;
+
+  for (const problem of content.problems ?? []) {
+    failures++;
+    console.log(`✖ ${problem}`);
+  }
+
+  // Native harness files (lele AGENTS.md, Goose recipes) are converted by their runtime's exporter.
+  for (const native of content.native ?? []) {
+    try {
+      const { spec, warnings } = (await cli.exporter(native.runtime)).parse(native.document);
+      const named = native.runtime === "lele" && spec && typeof spec === "object" ? { ...spec, name: native.name } : spec;
+      const { spec: valid, issues } = validateAgentSpec(named);
+      if (!valid) throw new Error(issues.map((i) => `${i.path}: ${i.message}`).join("; "));
+      for (const warning of warnings) console.log(`  ! ${native.path}: ${warning}`);
+      content.agents.push({ id: native.runtime === "lele" ? native.name : slugifyAgentId(valid.name), spec: valid });
+    } catch (error) {
+      failures++;
+      console.log(`✖ ${native.runtime} agent ${native.path}: ${reason(error)}`);
+    }
+  }
 
   for (const entry of content.items) {
     const label = `${entry.kind} ${entry.item.name}`;

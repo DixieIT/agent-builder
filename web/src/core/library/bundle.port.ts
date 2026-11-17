@@ -1,4 +1,4 @@
-import type { AgentSpec } from "@/core/agents/agent-spec";
+import type { AgentSpec, Runtime } from "@/core/agents/agent-spec";
 import type { LibraryItem } from "./library";
 
 /**
@@ -10,11 +10,19 @@ import type { LibraryItem } from "./library";
  *   <dir>/tools/<name>/main.py|main.ts|main.sh   (the code)
  *   <dir>/skills/<name>/SKILL.md        (frontmatter: name, description) + supporting files
  *
- * Every item folder/file can be imported on its own.
+ * Every item folder/file can be imported on its own, and so can any folder of items (e.g. an `agents/` folder,
+ * a lele `.lele/agents` folder, or a folder of Goose recipes).
  */
 export interface BundleContent {
   agents: { id: string; spec: AgentSpec }[];
   items: LibraryItem[];
+  /**
+   * Agents found in a harness's own format (lele AGENTS.md, Goose recipe). The codec doesn't parse them:
+   * the caller converts each with that runtime's AgentExporter.parse, keeping adapters independent.
+   */
+  native?: { path: string; runtime: Runtime; name: string; document: unknown }[];
+  /** Files that were skipped, one line each ("path: reason"). Reading never fails because of one bad file. */
+  problems?: string[];
 }
 
 export interface BundleCodec {

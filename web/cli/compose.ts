@@ -4,6 +4,7 @@ import type { Runtime } from "../src/core/agents/agent-spec";
 import type { EnvironmentStore } from "../src/core/environment/environment-store.port";
 import type { BundleCodec } from "../src/core/library/bundle.port";
 import type { LibraryRepository } from "../src/core/library/library-repository.port";
+import type { AgentExporter } from "../src/core/runtime/agent-exporter.port";
 import type { AgentRunner } from "../src/core/runtime/agent-runner.port";
 import type { RunService } from "../src/core/runtime/run-service";
 import * as container from "../src/server/container";
@@ -30,6 +31,7 @@ export interface CliComposition {
   environment(): Promise<EnvironmentStore>;
   runs(): Promise<RunService>;
   runner(runtime: Runtime): Promise<AgentRunner>;
+  exporter(runtime: Runtime): Promise<AgentExporter>;
   close(): Promise<void>;
 }
 
@@ -48,6 +50,7 @@ export async function compose(overrides: CliOverrides = {}): Promise<CliComposit
     environment: container.environmentStore,
     runs: container.runService,
     runner: container.agentRunner,
+    exporter: container.exporterFor,
     close: container.closeContainer,
   };
 }

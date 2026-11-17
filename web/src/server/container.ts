@@ -178,7 +178,8 @@ export function agentExporter(runtime: Runtime): AgentExporter {
   return cache.exporters[runtime]!;
 }
 
-async function exporterFor(runtime: Runtime): Promise<AgentExporter> {
+/** The exporter for a runtime: AgentSpec <-> harness-native definition (Goose recipe, lele AGENTS.md). */
+export async function exporterFor(runtime: Runtime): Promise<AgentExporter> {
   if (runtime === "goose") return agentExporter("goose");
   const exporter = cache.exporters.lele ?? new (await import("@/adapters/lele/lele-exporter")).LeleExporter();
   cache.exporters.lele = exporter;

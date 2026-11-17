@@ -1,5 +1,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
 import { isAgentId } from "@/core/agents/agent-id";
@@ -54,6 +57,12 @@ export class LeleCliRunner implements AgentRunner {
     try {
       if (!isAgentId(request.name)) throw new Error(`"${request.name}" is not a valid lele agent name.`);
       await syncProjectDefinition(this.projectDir, request.name, request.definition);
+
+      const trust = await projectTrust(this.projectDir, { ...process.env, ...request.env });
+      if (!trust.trusted) {
+        yield { type: "run.failed", message: trust.reason };
+        return;
+      }
 
       const args = ["-p", request.prompt || DEFAULT_PROMPT, "-a", request.name];
       const command = [this.bin, ...args].map(quoteArg).join(" ");
@@ -216,4 +225,23 @@ function stripAnsi(text: string): string {
 
 function quoteArg(arg: string): string {
   return /\s|"/.test(arg) ? `"${arg.replace(/"/g, '\\"')}"` : arg;
+}
+
+
+/**
+ * lele loads `.lele/agents` only from trusted projects; headless, an untrusted project silently falls back to the
+ * default agent. Mirror lele's own check (LELE_TRUST_PROJECT, then ~/.lele/trusted.json) and fail loudly instead.
+ */
+async function projectTrust(projectDir: string, env: NodeJS.ProcessEnv): Promise<{ trusted: boolean; reason: string }> {
+  const reason = `lele doesn't trust ${projectDir}, so it would ignore this agent and run its default one. Trust the project in lele (run \`lele\` there once) or set LELE_TRUST_PROJECT=1 for the builder.`;
+  if (env.LELE_TRUST_PROJECT === "1") return { trusted: true, reason: "" };
+  if (env.LELE_TRUST_PROJECT === "0") return { trusted: false, reason };
+  const key = (value: string) => path.resolve(value).toLowerCase();
+  try {
+    const trusted = JSON.parse(await readFile(path.join(os.homedir(), ".lele", "trusted.json"), "utf8")) as Record<string, unknown>;
+    for (const [dir, value] of Object.entries(trusted)) if (key(dir) === key(projectDir)) return { trusted: value === true, reason };
+  } catch {
+    // no decision persisted yet
+  }
+  return { trusted: false, reason };
 }

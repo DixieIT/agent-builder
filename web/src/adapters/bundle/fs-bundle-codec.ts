@@ -32,6 +32,7 @@ type Problems = string[];
 interface Collector {
   agents: BundleContent["agents"];
   items: LibraryItem[];
+  native: NonNullable<BundleContent["native"]>;
   problems: Problems;
 }
 
@@ -98,15 +99,22 @@ export class FsBundleCodec implements BundleCodec {
   }
 
   async read(source: string): Promise<BundleContent> {
-    const out: Collector = { agents: [], items: [], problems: [] };
+    const out: Collector = { agents: [], items: [], native: [], problems: [] };
     const info = await stat(source).catch(() => undefined);
     if (!info) throw new Error(`Bundle path does not exist: ${source}`);
-    if (info.isDirectory()) await collectDir(source, out);
+    if (info.isDirectory()) await collectDir(source, out, true);
     else await collectFile(source, out);
-    if (out.problems.length > 0) {
+    const found = out.agents.length + out.items.length + out.native.length;
+    // A single bad item (or a folder with nothing usable) is an error; a folder with some bad files is not.
+    if (found === 0 && out.problems.length > 0) {
       throw new Error(`Invalid bundle ${source}:\n${out.problems.map((problem) => `  ${problem}`).join("\n")}`);
     }
-    return { agents: out.agents, items: out.items };
+    return {
+      agents: out.agents,
+      items: out.items,
+      ...(out.native.length ? { native: out.native } : {}),
+      ...(out.problems.length ? { problems: out.problems } : {}),
+    };
   }
 }
 
@@ -197,11 +205,15 @@ async function exists(file: string): Promise<boolean> {
   return (await stat(file).catch(() => undefined))?.isFile() ?? false;
 }
 
-/** A dir is one item when it holds tool.yaml, SKILL.md or agent.yaml; otherwise it may be a dump root. */
-async function collectDir(folder: string, out: Collector): Promise<void> {
+/**
+ * A dir is one item when it holds tool.yaml, SKILL.md, agent.yaml or a lele AGENTS.md; a dump root when it has
+ * agents/, tools/, skills/ or capabilities/; otherwise (top level only) a plain collection of items.
+ */
+async function collectDir(folder: string, out: Collector, topLevel = false): Promise<void> {
   if (await exists(path.join(folder, "tool.yaml"))) return readTool(folder, out);
   if (await exists(path.join(folder, "SKILL.md"))) return readSkill(folder, out);
   if (await exists(path.join(folder, "agent.yaml"))) return readAgentFile(path.join(folder, "agent.yaml"), out);
+  if (await exists(path.join(folder, "AGENTS.md"))) return readLeleAgent(path.join(folder, "AGENTS.md"), path.basename(folder), out);
 
   let found = false;
   for (const sub of ROOT_FOLDERS) {
@@ -215,15 +227,41 @@ async function collectDir(folder: string, out: Collector): Promise<void> {
       else if (entry.isFile() && YAML_FILE.test(entry.name)) await collectFile(full, out);
     }
   }
-  if (!found) {
-    out.problems.push(`${folder}: not a tool (tool.yaml), skill (SKILL.md), agent (agent.yaml) or bundle root (agents/, tools/, skills/, capabilities/)`);
+  if (found) return;
+  if (!topLevel) {
+    out.problems.push(`${folder}: not a tool (tool.yaml), skill (SKILL.md), agent (agent.yaml, AGENTS.md) or bundle root`);
+    return;
   }
+  // A plain folder of items: agents/, .lele/agents, a folder of recipes or of tool folders.
+  for (const entry of await readdir(folder, { withFileTypes: true })) {
+    if (entry.name.startsWith(".")) continue;
+    const full = path.join(folder, entry.name);
+    if (entry.isDirectory()) await collectDir(full, out);
+    else if (entry.isFile() && (YAML_FILE.test(entry.name) || isLeleAgentFile(entry.name))) await collectFile(full, out);
+  }
+}
+
+function isLeleAgentFile(name: string): boolean {
+  return /\.md$/i.test(name) && !/^(README|SKILL|CHANGELOG|LICENSE)\.md$/i.test(name);
+}
+
+/** lele sub-agent file; the folder (or file) name is the agent name. Parsed later by the lele exporter. */
+async function readLeleAgent(file: string, name: string, out: Collector): Promise<void> {
+  const text = await readText(file, out);
+  if (text === undefined) return;
+  if (!FRONTMATTER.test(text)) {
+    out.problems.push(`${file}: not a lele agent (no --- frontmatter)`);
+    return;
+  }
+  out.native.push({ path: file, runtime: "lele", name, document: text });
 }
 
 /** A file is a capability or an agent YAML, or a tool.yaml / SKILL.md that stands for its folder. */
 async function collectFile(file: string, out: Collector): Promise<void> {
   const name = path.basename(file);
   if (name === "tool.yaml" || name === "SKILL.md") return collectDir(path.dirname(file), out);
+  if (name === "AGENTS.md") return readLeleAgent(file, path.basename(path.dirname(file)), out);
+  if (isLeleAgentFile(name)) return readLeleAgent(file, name.replace(/\.md$/i, ""), out);
   if (!YAML_FILE.test(name)) {
     out.problems.push(`${file}: not a bundle item; expected a .yaml file, tool.yaml or SKILL.md`);
     return;
@@ -293,11 +331,21 @@ async function readAgentFile(file: string, out: Collector): Promise<void> {
 
 function readAgent(file: string, meta: unknown, out: Collector): void {
   const result = agentSpecSchema.safeParse(meta);
+  if (!result.success && isGooseRecipe(meta)) {
+    out.native.push({ path: file, runtime: "goose", name: path.basename(file).replace(YAML_FILE, ""), document: meta });
+    return;
+  }
   if (!result.success) return report(out, file, result.error.issues);
   const base =
     path.basename(file) === "agent.yaml" ? path.basename(path.dirname(file)) : path.basename(file).replace(YAML_FILE, "");
   const id = isAgentId(base) ? base : slugifyAgentId(result.data.name);
   out.agents.push({ id, spec: result.data });
+}
+
+/** A Goose recipe (or its Desktop wrapper) rather than an AgentSpec: it has a title and no name/runtime. */
+function isGooseRecipe(value: unknown): boolean {
+  const doc = isRecord(value) && isRecord(value.recipe) ? value.recipe : value;
+  return isRecord(doc) && typeof doc.title === "string" && !("name" in doc) && !("runtime" in doc);
 }
 
 /** Every text file under a skill folder except SKILL.md and dot-files/folders; oversized or binary files are skipped. */

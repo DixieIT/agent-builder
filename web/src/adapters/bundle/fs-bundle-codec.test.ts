@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -150,6 +150,43 @@ describe("FsBundleCodec", () => {
       const message = (error as Error).message;
       expect(message).toContain("tool.yaml: language");
       expect(message).toContain("tool.yaml: description");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("FsBundleCodec folders of items", () => {
+  test("reads any folder of agents: specs, lele AGENTS.md (folders and flat .md) and Goose recipes", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "bundle-folder-"));
+    try {
+      await writeFile(path.join(dir, "goose-native.yaml"), "name: goose_native\ninstructions: Hi\ncapabilities: []\n");
+      await writeFile(path.join(dir, "recipe.yaml"), "version: 1.0.0\ntitle: Recipe agent\ndescription: d\ninstructions: Hi\n");
+      await mkdir(path.join(dir, "explorer"));
+      await writeFile(path.join(dir, "explorer", "AGENTS.md"), "---\ntools: {}\n---\nYou explore.\n");
+      await writeFile(path.join(dir, "flat-agent.md"), "---\nmodel: x/y\n---\nFlat.\n");
+      await writeFile(path.join(dir, "README.md"), "# not an agent\n");
+      await writeFile(path.join(dir, "broken.yaml"), "name: [unclosed\n");
+
+      const content = await new FsBundleCodec().read(dir);
+
+      expect(content.agents.map((a) => a.id)).toEqual(["goose-native"]);
+      expect(content.native?.map((n) => [n.runtime, n.name]).sort()).toEqual([
+        ["goose", "recipe"],
+        ["lele", "explorer"],
+        ["lele", "flat-agent"],
+      ]);
+      expect(content.problems?.some((p) => p.includes("broken.yaml"))).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a folder with nothing usable is still an error", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "bundle-empty-"));
+    try {
+      await writeFile(path.join(dir, "broken.yaml"), "name: [unclosed\n");
+      await expect(new FsBundleCodec().read(dir)).rejects.toThrow("broken.yaml");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
